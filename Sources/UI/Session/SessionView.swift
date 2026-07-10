@@ -1,0 +1,580 @@
+import SwiftUI
+import Foundation
+import CoreGraphics
+#if canImport(UIKit)
+import UIKit
+#endif
+
+/// Flighty-style live session tracker bound to `SessionEngine.shared`.
+/// Presented with the shot the user chose; starts the engine on appear.
+/// Aborts on disappear only if the user explicitly confirmed leaving mid-session.
+struct SessionView: View {
+    let shot: ShotModeItem
+
+    @ObservedObject private var appearance = Appearance.shared
+    @Environment(\.dismiss) private var dismiss
+    @State private var showEndDialog = false
+    @State private var abortOnExit = false
+
+    init(shot: ShotModeItem) {
+        self.shot = shot
+    }
+
+    var body: some View {
+        let night = appearance.nightMode
+        ZStack {
+            Theme.screenBg(night).ignoresSafeArea()
+            TimelineView(.periodic(from: .now, by: 0.5)) { context in
+                content(now: context.date, night: night)
+            }
+        }
+        .navigationBarTitleDisplayMode(.inline)
+        .onAppear {
+            #if canImport(UIKit)
+            UIDevice.current.isBatteryMonitoringEnabled = true
+            #endif
+            SessionEngine.shared.start(shot: shot)
+        }
+        .onDisappear {
+            // Only abort if the user explicitly chose to leave mid-session.
+            if abortOnExit {
+                Task { await SessionEngine.shared.stop() }
+            }
+        }
+        .confirmationDialog("Stop this session?", isPresented: $showEndDialog, titleVisibility: .visible) {
+            Button("Stop & develop the stack") {
+                Task { await SessionEngine.shared.stop() }
+            }
+            Button("Stop & leave now", role: .destructive) {
+                abortOnExit = true
+                dismiss()
+            }
+            Button("Keep shooting", role: .cancel) {}
+        } message: {
+            Text("Everything captured so far is kept either way. Developing shows your landing report here.")
+        }
+    }
+
+    // MARK: - Live content
+
+    @ViewBuilder
+    private func content(now: Date, night: Bool) -> some View {
+        let engine = SessionEngine.shared
+        let phase = engine.phase
+        let stats = engine.stats
+
+        ScrollView {
+            VStack(alignment: .leading, spacing: 16) {
+                header(phase: phase, stats: stats, now: now, night: night)
+
+                SFCard { PhaseTimeline(phase: phase, night: night) }
+
+                if phase == .complete {
+                    LandingReport(shot: shot, stats: stats, preview: engine.latestPreview,
+                                  night: night, onNewSession: { dismiss() })
+                } else {
+                    heroCard(stats: stats, night: night)
+                    previewCard(phase: phase, stats: stats, preview: engine.latestPreview, night: night)
+                    telemetryCard(stats: stats, phase: phase, night: night)
+
+                    if let interruption = engine.interruption {
+                        GuardianBanner(interruption: interruption, night: night)
+                            .transition(.move(edge: .top).combined(with: .opacity))
+                    }
+
+                    footerControls(phase: phase, night: night)
+                }
+            }
+            .padding(16)
+            .animation(.spring(duration: 0.45), value: engine.interruption)
+            .animation(.spring(duration: 0.45), value: phase)
+        }
+        .scrollIndicators(.hidden)
+    }
+
+    // MARK: - Header
+
+    private func header(phase: SessionPhase, stats: SessionStats, now: Date, night: Bool) -> some View {
+        HStack(alignment: .top, spacing: 12) {
+            VStack(alignment: .leading, spacing: 4) {
+                Text(shot.name)
+                    .font(Theme.title)
+                    .foregroundStyle(Theme.primaryText(night))
+                if let startedAt = stats.startedAt, phase != .complete {
+                    Text("Elapsed \(sessionClock(now.timeIntervalSince(startedAt)))")
+                        .font(Theme.liveValue(13))
+                        .foregroundStyle(Theme.secondaryText(night))
+                } else {
+                    Text(shot.tagline)
+                        .font(Theme.caption)
+                        .foregroundStyle(Theme.secondaryText(night))
+                        .lineLimit(2)
+                }
+            }
+            Spacer(minLength: 8)
+            phaseBadge(phase, night: night)
+        }
+    }
+
+    private func phaseBadge(_ phase: SessionPhase, night: Bool) -> some View {
+        let tint = phase == .complete ? Theme.positive(night) : Theme.accent(night)
+        return Text(phase.rawValue.uppercased())
+            .font(Theme.label)
+            .kerning(1.2)
+            .foregroundStyle(tint)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 5)
+            .background(Capsule().fill(tint.opacity(0.12)))
+    }
+
+    // MARK: - Hero: integration counter
+
+    private func heroCard(stats: SessionStats, night: Bool) -> some View {
+        let target = max(shot.recipe.targetSubCount, 1)
+        let progress = min(1.0, Double(stats.subsAccepted) / Double(target))
+        return SFCard {
+            VStack(alignment: .leading, spacing: 14) {
+                SFSectionLabel("Integration")
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Text(sessionClock(stats.integrationSeconds))
+                        .font(Theme.heroNumber(56))
+                        .foregroundStyle(Theme.primaryText(night))
+                        .contentTransition(.numericText())
+                        .animation(.easeOut(duration: 0.35), value: stats.integrationSeconds)
+                    Text("min")
+                        .font(Theme.caption)
+                        .foregroundStyle(Theme.secondaryText(night))
+                }
+                ProgressView(value: progress)
+                    .tint(Theme.accent(night))
+                HStack(spacing: 8) {
+                    SFStatChip(symbol: "checkmark.circle", value: "\(stats.subsAccepted)",
+                               label: "accepted", tint: Theme.positive(night))
+                    SFStatChip(symbol: "xmark.circle", value: "\(stats.subsRejected)",
+                               label: "rejected",
+                               tint: stats.subsRejected > 0 ? Theme.warning(night) : nil)
+                    SFStatChip(symbol: "square.stack.3d.up", value: "\(shot.recipe.targetSubCount)",
+                               label: "target")
+                }
+            }
+        }
+    }
+
+    // MARK: - Live preview
+
+    private func previewCard(phase: SessionPhase, stats: SessionStats, preview: CGImage?, night: Bool) -> some View {
+        SFCard {
+            VStack(alignment: .leading, spacing: 10) {
+                SFSectionLabel("Live stack")
+                ZStack {
+                    if let preview {
+                        Image(decorative: preview, scale: 1)
+                            .resizable()
+                            .scaledToFill()
+                            .frame(height: 220)
+                            .frame(maxWidth: .infinity)
+                            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                            .colorMultiply(night ? Theme.nightRed : .white)
+                    } else {
+                        StarfieldPlaceholder(night: night)
+                            .frame(height: 220)
+                            .frame(maxWidth: .infinity)
+                            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                            .overlay(alignment: .bottomLeading) {
+                                Text(phase == .capture
+                                     ? "First preview lands after the first accepted subs."
+                                     : "Preview appears once capture begins.")
+                                    .font(Theme.caption)
+                                    .foregroundStyle(Theme.secondaryText(night))
+                                    .padding(10)
+                            }
+                    }
+                    if phase == .develop {
+                        RoundedRectangle(cornerRadius: 12, style: .continuous)
+                            .fill(Color.black.opacity(0.55))
+                            .frame(height: 220)
+                        VStack(spacing: 10) {
+                            ProgressView()
+                                .tint(Theme.accent(night))
+                            Text("Aligning and stacking \(stats.subsAccepted) subs…")
+                                .font(Theme.body)
+                                .foregroundStyle(Theme.primaryText(night))
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // MARK: - Telemetry chips
+
+    private func telemetryCard(stats: SessionStats, phase: SessionPhase, night: Bool) -> some View {
+        let heat = thermal
+        return SFCard {
+            VStack(spacing: 14) {
+                HStack(spacing: 8) {
+                    SFStatChip(symbol: "battery.75", value: gimbalBattery, label: "gimbal")
+                    SFStatChip(symbol: "iphone", value: phoneBattery, label: "phone")
+                    SFStatChip(symbol: "thermometer.medium", value: heat.0, label: "thermal",
+                               tint: heat.1 ? Theme.warning(night) : nil)
+                }
+                HStack(spacing: 8) {
+                    SFStatChip(symbol: "scope", value: "\(stats.nudges)", label: "nudges")
+                    SFStatChip(symbol: "location.north.line", value: driftStatus(phase: phase), label: "drift")
+                    SFStatChip(symbol: "arrow.triangle.2.circlepath", value: "\(stats.flapsRecovered)", label: "flaps")
+                }
+            }
+        }
+    }
+
+    private var gimbalBattery: String {
+        if let percent = MountService.shared.telemetry?.batteryPercent {
+            return "\(percent)%"
+        }
+        return "—"
+    }
+
+    private var phoneBattery: String {
+        #if canImport(UIKit)
+        let level = UIDevice.current.batteryLevel
+        guard level >= 0 else { return "—" }   // simulator reports -1
+        return "\(Int((level * 100).rounded()))%"
+        #else
+        return "—"
+        #endif
+    }
+
+    private var thermal: (String, Bool) {
+        switch ProcessInfo.processInfo.thermalState {
+        case .nominal: return ("OK", false)
+        case .fair: return ("Fair", false)
+        case .serious: return ("Hot", true)
+        case .critical: return ("Crit", true)
+        @unknown default: return ("—", false)
+        }
+    }
+
+    private func driftStatus(phase: SessionPhase) -> String {
+        guard shot.recipe.nudgeTracking else { return "Off" }
+        switch phase {
+        case .capture: return "Held"
+        case .develop, .complete: return "Done"
+        default: return "Armed"
+        }
+    }
+
+    // MARK: - Footer: stop / developing
+
+    @ViewBuilder
+    private func footerControls(phase: SessionPhase, night: Bool) -> some View {
+        if phase == .develop {
+            HStack(spacing: 10) {
+                ProgressView()
+                    .tint(Theme.accent(night))
+                Text("Developing — hold tight, your landing report is next.")
+                    .font(Theme.body)
+                    .foregroundStyle(Theme.secondaryText(night))
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 12)
+        } else {
+            Button {
+                showEndDialog = true
+            } label: {
+                Label("Stop session", systemImage: "stop.circle.fill")
+                    .font(Theme.headline)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 14)
+            }
+            .foregroundStyle(Theme.danger(night))
+            .background(
+                Capsule()
+                    .fill(Theme.danger(night).opacity(0.12))
+                    .overlay(Capsule().strokeBorder(Theme.danger(night).opacity(0.45), lineWidth: 1))
+            )
+            .padding(.top, 4)
+        }
+    }
+}
+
+// MARK: - Shared formatting
+
+/// mm:ss (or h:mm:ss past an hour), monospaced-digit friendly.
+private func sessionClock(_ seconds: Double) -> String {
+    let s = max(0, Int(seconds))
+    if s >= 3600 {
+        return String(format: "%d:%02d:%02d", s / 3600, (s % 3600) / 60, s % 60)
+    }
+    return String(format: "%d:%02d", s / 60, s % 60)
+}
+
+// MARK: - Phase timeline
+
+private struct PhaseTimeline: View {
+    let phase: SessionPhase
+    let night: Bool
+
+    private static let steps: [SessionPhase] = [.connect, .aim, .calibrate, .capture, .develop]
+
+    private var currentIndex: Int {
+        if phase == .complete { return Self.steps.count }
+        return Self.steps.firstIndex(of: phase) ?? 0
+    }
+
+    private var fraction: CGFloat {
+        min(1, CGFloat(currentIndex) / CGFloat(Self.steps.count - 1))
+    }
+
+    var body: some View {
+        VStack(spacing: 10) {
+            HStack(spacing: 6) {
+                ForEach(Array(Self.steps.enumerated()), id: \.offset) { index, step in
+                    stepCapsule(step: step, index: index)
+                }
+            }
+            GeometryReader { geo in
+                ZStack(alignment: .leading) {
+                    Capsule()
+                        .fill(Theme.secondaryText(night).opacity(0.18))
+                        .frame(height: 3)
+                    Capsule()
+                        .fill(Theme.accent(night))
+                        .frame(width: geo.size.width * fraction, height: 3)
+                }
+            }
+            .frame(height: 3)
+        }
+        .animation(.easeInOut(duration: 0.6), value: currentIndex)
+    }
+
+    private func stepCapsule(step: SessionPhase, index: Int) -> some View {
+        let isCurrent = index == currentIndex
+        let isDone = index < currentIndex
+        return Text(step.rawValue)
+            .font(.system(size: 10, weight: .semibold, design: .rounded))
+            .lineLimit(1)
+            .minimumScaleFactor(0.7)
+            .padding(.horizontal, 4)
+            .padding(.vertical, 5)
+            .frame(maxWidth: .infinity)
+            .background(
+                Capsule()
+                    .fill(isCurrent ? Theme.accent(night).opacity(0.16) : Color.clear)
+                    .overlay(
+                        Capsule().strokeBorder(
+                            isCurrent
+                                ? Theme.accent(night)
+                                : (isDone ? Theme.accent(night).opacity(0.4)
+                                          : Theme.secondaryText(night).opacity(0.25)),
+                            lineWidth: 1)
+                    )
+            )
+            .foregroundStyle(
+                isCurrent
+                    ? Theme.accent(night)
+                    : (isDone ? Theme.primaryText(night) : Theme.secondaryText(night))
+            )
+    }
+}
+
+// MARK: - Guardian banners
+
+private struct GuardianBanner: View {
+    let interruption: SessionInterruption
+    let night: Bool
+
+    var body: some View {
+        let s = spec
+        SFCard(accent: s.tint) {
+            HStack(alignment: .top, spacing: 14) {
+                Image(systemName: s.symbol)
+                    .font(.system(size: 26, weight: .medium))
+                    .foregroundStyle(s.tint)
+                    .frame(width: 34)
+                VStack(alignment: .leading, spacing: 4) {
+                    Text(s.title)
+                        .font(Theme.headline)
+                        .foregroundStyle(Theme.primaryText(night))
+                    Text(s.message)
+                        .font(Theme.body)
+                        .foregroundStyle(Theme.secondaryText(night))
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+        }
+    }
+
+    private var spec: (symbol: String, title: String, message: String, tint: Color) {
+        switch interruption {
+        case .authorityNeeded:
+            return ("hand.tap.fill",
+                    "Squeeze the trigger",
+                    "The motors are waiting for permission. Squeeze the front trigger once — the ring light turns solid — and StarFlow takes it from there. Your stack is paused, not lost.",
+                    Theme.accent(night))
+        case .gimbalFlapping:
+            return ("antenna.radiowaves.left.and.right",
+                    "Gimbal reconnecting — stack is safe",
+                    "The dock link dropped for a moment. Capture resumes by itself when it re-docks, and pointing gets re-checked.",
+                    Theme.warning(night))
+        case .gimbalLost:
+            return ("bolt.horizontal.circle",
+                    "Gimbal connection lost",
+                    "It didn't come back within \(Int(GimbalConstants.flapDebounce)) seconds. Re-dock the phone — everything stacked so far is safe.",
+                    Theme.danger(night))
+        case .thermalBackoff:
+            return ("thermometer.medium",
+                    "Cooling down",
+                    "The phone is running warm, so capture cadence is slowed. Slightly fewer subs per minute; the stack keeps growing.",
+                    Theme.warning(night))
+        case .thermalCritical:
+            return ("thermometer.sun.fill",
+                    "Too hot — saving your stack",
+                    "Thermal limit reached. StarFlow is stopping gracefully and keeping everything captured so far.",
+                    Theme.danger(night))
+        case .batteryLow(let percent):
+            return ("battery.25",
+                    "Battery at \(percent)%",
+                    "Below 20% the session stops and saves automatically. Plug in now to keep integrating.",
+                    Theme.danger(night))
+        case .storageLow:
+            return ("internaldrive.fill",
+                    "Storage low",
+                    "Free up space soon — the session will stop early and save if the disk fills.",
+                    Theme.warning(night))
+        case .backgrounded:
+            return ("moon.zzz.fill",
+                    "Paused in background",
+                    "Capture pauses while StarFlow is backgrounded. Come back to resume — the stack is safe.",
+                    Theme.warning(night))
+        }
+    }
+}
+
+// MARK: - Landing report
+
+private struct LandingReport: View {
+    let shot: ShotModeItem
+    let stats: SessionStats
+    let preview: CGImage?
+    let night: Bool
+    let onNewSession: () -> Void
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            SFCard(accent: Theme.positive(night)) {
+                VStack(alignment: .leading, spacing: 14) {
+                    HStack(spacing: 8) {
+                        Image(systemName: "checkmark.seal.fill")
+                            .foregroundStyle(Theme.positive(night))
+                        Text("Session complete")
+                            .font(Theme.title)
+                            .foregroundStyle(Theme.primaryText(night))
+                    }
+                    HStack(alignment: .firstTextBaseline, spacing: 8) {
+                        Text(sessionClock(stats.integrationSeconds))
+                            .font(Theme.heroNumber(52))
+                            .foregroundStyle(Theme.primaryText(night))
+                        Text("total integration")
+                            .font(Theme.caption)
+                            .foregroundStyle(Theme.secondaryText(night))
+                    }
+                    HStack(spacing: 8) {
+                        SFStatChip(symbol: "square.stack.3d.up.fill", value: "\(stats.subsAccepted)",
+                                   label: "subs stacked", tint: Theme.positive(night))
+                        SFStatChip(symbol: "xmark.circle", value: "\(stats.subsRejected)",
+                                   label: "rejected")
+                    }
+                    HStack(spacing: 8) {
+                        SFStatChip(symbol: "scope", value: "\(stats.nudges)", label: "nudges")
+                        SFStatChip(symbol: "arrow.triangle.2.circlepath", value: "\(stats.flapsRecovered)",
+                                   label: "flaps recovered")
+                    }
+                    Text("Stacked from \(stats.subsAccepted) × 1 s subs — the honest way a phone does a long exposure.")
+                        .font(Theme.caption)
+                        .foregroundStyle(Theme.secondaryText(night))
+                }
+            }
+
+            if let preview {
+                let image = Image(decorative: preview, scale: 1)
+                SFCard {
+                    VStack(alignment: .leading, spacing: 12) {
+                        SFSectionLabel("Your stack")
+                        image
+                            .resizable()
+                            .scaledToFill()
+                            .frame(height: 240)
+                            .frame(maxWidth: .infinity)
+                            .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                            .colorMultiply(night ? Theme.nightRed : .white)
+                        ShareLink(item: image,
+                                  preview: SharePreview("StarFlow — \(shot.name)", image: image)) {
+                            Label("Share the stack", systemImage: "square.and.arrow.up")
+                                .font(Theme.headline)
+                                .frame(maxWidth: .infinity)
+                                .padding(.vertical, 12)
+                        }
+                        .foregroundStyle(night ? Theme.nightRed : Color.black)
+                        .background(Capsule().fill(night ? Theme.nightRedDim.opacity(0.4) : Theme.gold))
+                    }
+                }
+            } else {
+                SFCard {
+                    Text("No preview image was produced this run — subs are saved, so nothing is lost.")
+                        .font(Theme.body)
+                        .foregroundStyle(Theme.secondaryText(night))
+                }
+            }
+
+            Button(action: onNewSession) {
+                Label("New session", systemImage: "plus.circle")
+                    .font(Theme.headline)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 14)
+            }
+            .foregroundStyle(Theme.accent(night))
+            .background(Capsule().strokeBorder(Theme.accent(night).opacity(0.5), lineWidth: 1))
+        }
+    }
+}
+
+// MARK: - Animated starfield placeholder
+
+private struct StarfieldPlaceholder: View {
+    let night: Bool
+
+    var body: some View {
+        TimelineView(.animation(minimumInterval: 1.0 / 12.0)) { context in
+            Canvas { canvas, size in
+                let t = context.date.timeIntervalSinceReferenceDate
+                var rng = SeededRandom(seed: 42)
+                for _ in 0..<90 {
+                    let x = rng.next() * size.width
+                    let y = rng.next() * size.height
+                    let base = 0.25 + rng.next() * 0.55
+                    let speed = 0.4 + rng.next() * 1.2
+                    let phase = rng.next() * .pi * 2
+                    let twinkle = 0.55 + 0.45 * sin(t * speed + phase)
+                    let r = 0.6 + rng.next() * 1.3
+                    let color = (night ? Theme.nightRed : Color.white).opacity(base * twinkle)
+                    canvas.fill(
+                        Path(ellipseIn: CGRect(x: x - r, y: y - r, width: r * 2, height: r * 2)),
+                        with: .color(color))
+                }
+            }
+            .background(night ? Color.black : Theme.bg)
+        }
+    }
+}
+
+/// Deterministic xorshift so the placeholder stars don't jump between frames.
+private struct SeededRandom {
+    private var state: UInt64
+    init(seed: UInt64) { state = seed &* 0x9E37_79B9_7F4A_7C15 | 1 }
+    mutating func next() -> Double {
+        state ^= state << 13
+        state ^= state >> 7
+        state ^= state << 17
+        return Double(state % 1_000_000) / 1_000_000
+    }
+}
