@@ -1,0 +1,57 @@
+name: StarFlow
+options:
+  bundleIdPrefix: com.chinmay
+  deploymentTarget:
+    iOS: "18.0"
+  createIntermediateGroups: true
+targets:
+  StarFlow:
+    type: application
+    platform: iOS
+    deploymentTarget: "18.0"
+    sources:
+      - Sources
+    info:
+      path: Sources/Info.plist
+      properties:
+        CFBundleDisplayName: StarFlow
+        CFBundleShortVersionString: "0.1.0"
+        CFBundleVersion: "1"
+        UILaunchScreen: {}
+        NSCameraUsageDescription: StarFlow uses the camera to capture night-sky exposures and to control your gimbal.
+        NSLocationWhenInUseUsageDescription: Your location computes tonight's sky — where the Milky Way is, moonrise, and darkness windows. It never leaves the device.
+        UIFileSharingEnabled: true
+        LSSupportsOpeningDocumentsInPlace: true
+        UISupportedInterfaceOrientations:
+          - UIInterfaceOrientationPortrait
+        ITSAppUsesNonExemptEncryption: false
+        UIUserInterfaceStyle: Dark
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.chinmay.starflow
+        SWIFT_VERSION: "5.10"
+        TARGETED_DEVICE_FAMILY: "1"
+        IPHONEOS_DEPLOYMENT_TARGET: "18.0"
+        CODE_SIGN_STYLE: Manual
+        DEVELOPMENT_TEAM: ""
+  StarFlowTests:
+    type: bundle.unit-test
+    platform: iOS
+    deploymentTarget: "18.0"
+    sources:
+      - Tests
+    dependencies:
+      - target: StarFlow
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.chinmay.starflow.tests
+        SWIFT_VERSION: "5.10"
+schemes:
+  StarFlow:
+    build:
+      targets:
+        StarFlow: all
+        StarFlowTests: [test]
+    test:
+      targets:
+        - StarFlowTests

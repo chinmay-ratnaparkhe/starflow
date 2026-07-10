@@ -1,0 +1,56 @@
+name: Build and test
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch: {}
+
+jobs:
+  build:
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode project
+        run: xcodegen generate
+
+      - name: Unit tests (simulator)
+        run: |
+          DEST=$(xcrun simctl list devices available | grep -Eo "iPhone 1[5-9][^(]*" | head -1 | xargs)
+          if [ -z "$DEST" ]; then DEST="iPhone 16 Pro"; fi
+          echo "Using simulator: $DEST"
+          xcodebuild test \
+            -project StarFlow.xcodeproj \
+            -scheme StarFlow \
+            -destination "platform=iOS Simulator,name=$DEST" \
+            CODE_SIGNING_ALLOWED=NO | tail -100
+
+      - name: Build archive (unsigned device IPA)
+        run: |
+          xcodebuild \
+            -project StarFlow.xcodeproj \
+            -scheme StarFlow \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -archivePath build/StarFlow.xcarchive \
+            archive \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO
+
+      - name: Package IPA
+        run: |
+          mkdir -p build/Payload
+          cp -R "build/StarFlow.xcarchive/Products/Applications/StarFlow.app" build/Payload/
+          cd build
+          zip -qr StarFlow.ipa Payload
+
+      - name: Upload IPA artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: StarFlow-ipa
+          path: build/StarFlow.ipa
+          retention-days: 30
