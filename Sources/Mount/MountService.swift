@@ -377,7 +377,7 @@ public final class MountService: ObservableObject, MountControlling {
         }
     }
 
-    private func applyStateChange(_ change: DockAccessoryManager.StateChange) {
+    private func applyStateChange(_ change: DockAccessory.StateChange) {
         // Motor authority rides on the tracking-button state: trigger squeeze enables it,
         // and it auto-restores after re-docks (measured, bench run 3).
         setAuthority(change.trackingButtonEnabled ? .granted : .denied)
@@ -406,9 +406,9 @@ public final class MountService: ObservableObject, MountControlling {
             do {
                 for try await motion in try acc.motionStates {
                     guard let self, !Task.isCancelled else { break }
-                    let angles = motion.orientation.eulerAngles(order: .xyz).angles
-                    self.ingestEncoderSample(pitchDeg: Double(angles.x) * 180.0 / .pi,
-                                             yawDeg: Double(angles.y) * 180.0 / .pi,
+                    let pos = motion.angularPositions
+                    self.ingestEncoderSample(pitchDeg: pos.x * 180.0 / .pi,
+                                             yawDeg: pos.y * 180.0 / .pi,
                                              batteryPercent: nil)
                 }
             } catch {

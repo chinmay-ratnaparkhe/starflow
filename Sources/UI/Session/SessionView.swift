@@ -38,12 +38,12 @@ struct SessionView: View {
         .onDisappear {
             // Only abort if the user explicitly chose to leave mid-session.
             if abortOnExit {
-                Task { await SessionEngine.shared.stop() }
+                SessionEngine.shared.abort()
             }
         }
         .confirmationDialog("Stop this session?", isPresented: $showEndDialog, titleVisibility: .visible) {
             Button("Stop & develop the stack") {
-                Task { await SessionEngine.shared.stop() }
+                SessionEngine.shared.abort()
             }
             Button("Stop & leave now", role: .destructive) {
                 abortOnExit = true
