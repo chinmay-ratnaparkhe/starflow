@@ -19,6 +19,7 @@ targets:
         CFBundleVersion: "1"
         UILaunchScreen: {}
         NSCameraUsageDescription: StarFlow uses the camera to capture night-sky exposures and to control your gimbal.
+        NSPhotoLibraryAddUsageDescription: StarFlow saves your finished star photos to your library.
         NSLocationWhenInUseUsageDescription: Your location computes tonight's sky — where the Milky Way is, moonrise, and darkness windows. It never leaves the device.
         UIFileSharingEnabled: true
         LSSupportsOpeningDocumentsInPlace: true

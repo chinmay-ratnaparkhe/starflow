@@ -154,6 +154,7 @@ private struct ModeDetailSheet: View {
     let item: ShotModeItem
     let feasibility: Feasibility?
     @State private var sessionShot: ShotModeItem?
+    @State private var checkedSteps: Set<Int> = []
 
     init(item: ShotModeItem, feasibility: Feasibility?) {
         self.item = item
@@ -180,6 +181,10 @@ private struct ModeDetailSheet: View {
                         requirementTags(night: night)
                         SFSectionLabel("How it works")
                         tutorialCard(steps: item.tutorial, night: night)
+                        if !item.checklist.isEmpty {
+                            SFSectionLabel("Before you start · \(checkedSteps.count)/\(item.checklist.count)")
+                            checklistCard(night: night)
+                        }
                         startButton(night: night)
                     }
                     .padding(.horizontal, 16)
@@ -305,6 +310,48 @@ private struct ModeDetailSheet: View {
                                 .foregroundStyle(Theme.secondaryText(night))
                                 .fixedSize(horizontal: false, vertical: true)
                         }
+                    }
+                }
+            }
+        }
+    }
+
+    /// Tappable setup check rows — a pre-flight ritual, not a gate: Start stays enabled.
+    private func checklistCard(night: Bool) -> some View {
+        SFCard {
+            VStack(alignment: .leading, spacing: 2) {
+                ForEach(item.checklist.indices, id: \.self) { i in
+                    let done = checkedSteps.contains(i)
+                    Button {
+                        withAnimation(.easeInOut(duration: 0.15)) {
+                            if done {
+                                checkedSteps.remove(i)
+                            } else {
+                                checkedSteps.insert(i)
+                            }
+                        }
+                    } label: {
+                        HStack(alignment: .top, spacing: 10) {
+                            Image(systemName: done ? "checkmark.circle.fill" : "circle")
+                                .font(.system(size: 18, weight: .medium))
+                                .foregroundStyle(done ? Theme.positive(night)
+                                                      : Theme.secondaryText(night).opacity(0.6))
+                                .padding(.top, 1)
+                            Text(item.checklist[i])
+                                .font(Theme.caption)
+                                .foregroundStyle(done ? Theme.secondaryText(night)
+                                                      : Theme.primaryText(night))
+                                .strikethrough(done, color: Theme.secondaryText(night))
+                                .multilineTextAlignment(.leading)
+                                .fixedSize(horizontal: false, vertical: true)
+                            Spacer(minLength: 0)
+                        }
+                        .padding(.vertical, 6)
+                        .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    if i < item.checklist.count - 1 {
+                        Divider().overlay(Theme.accent(night).opacity(0.10))
                     }
                 }
             }

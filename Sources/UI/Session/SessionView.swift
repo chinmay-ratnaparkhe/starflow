@@ -12,9 +12,11 @@ struct SessionView: View {
     let shot: ShotModeItem
 
     @ObservedObject private var appearance = Appearance.shared
+    @ObservedObject private var engine = SessionEngine.shared
     @Environment(\.dismiss) private var dismiss
     @State private var showEndDialog = false
     @State private var abortOnExit = false
+    @State private var loggedSession = false
 
     init(shot: ShotModeItem) {
         self.shot = shot
@@ -39,6 +41,17 @@ struct SessionView: View {
             // Only abort if the user explicitly chose to leave mid-session.
             if abortOnExit {
                 SessionEngine.shared.abort()
+                // abort() lands on .complete when frames were kept — log those too.
+                if SessionEngine.shared.phase == .complete {
+                    logSessionIfNeeded()
+                }
+            }
+        }
+        .onChange(of: engine.phase) { oldPhase, newPhase in
+            guard oldPhase != newPhase else { return }
+            phaseFeedback(for: newPhase)
+            if newPhase == .complete {
+                logSessionIfNeeded()
             }
         }
         .confirmationDialog("Stop this session?", isPresented: $showEndDialog, titleVisibility: .visible) {
@@ -59,7 +72,6 @@ struct SessionView: View {
 
     @ViewBuilder
     private func content(now: Date, night: Bool) -> some View {
-        let engine = SessionEngine.shared
         let phase = engine.phase
         let stats = engine.stats
 
@@ -72,24 +84,62 @@ struct SessionView: View {
                 if phase == .complete {
                     LandingReport(shot: shot, stats: stats, preview: engine.latestPreview,
                                   night: night, onNewSession: { dismiss() })
+                        .transition(.asymmetric(
+                            insertion: .scale(scale: 0.94).combined(with: .opacity),
+                            removal: .opacity))
                 } else {
-                    heroCard(stats: stats, night: night)
-                    previewCard(phase: phase, stats: stats, preview: engine.latestPreview, night: night)
-                    telemetryCard(stats: stats, phase: phase, night: night)
+                    Group {
+                        heroCard(stats: stats, night: night)
+                        previewCard(phase: phase, stats: stats, preview: engine.latestPreview, night: night)
+                        telemetryCard(stats: stats, phase: phase, night: night)
 
-                    if let interruption = engine.interruption {
-                        GuardianBanner(interruption: interruption, night: night)
-                            .transition(.move(edge: .top).combined(with: .opacity))
+                        if let interruption = engine.interruption {
+                            GuardianBanner(interruption: interruption, night: night)
+                                .transition(.move(edge: .top).combined(with: .opacity))
+                        }
+
+                        footerControls(phase: phase, night: night)
                     }
-
-                    footerControls(phase: phase, night: night)
+                    .transition(.opacity)
                 }
             }
             .padding(16)
             .animation(.spring(duration: 0.45), value: engine.interruption)
-            .animation(.spring(duration: 0.45), value: phase)
+            .animation(.spring(duration: 0.55, bounce: 0.25), value: phase)
         }
         .scrollIndicators(.hidden)
+    }
+
+    // MARK: - Phase feedback (haptics) + logbook
+
+    /// A gentle tap as the session advances a phase; a success chord on landing.
+    private func phaseFeedback(for newPhase: SessionPhase) {
+        #if canImport(UIKit)
+        if newPhase == .complete {
+            UINotificationFeedbackGenerator().notificationOccurred(.success)
+        } else {
+            UIImpactFeedbackGenerator(style: .medium).impactOccurred()
+        }
+        #endif
+    }
+
+    /// File this session in the logbook exactly once, preview thumbnail included.
+    private func logSessionIfNeeded() {
+        guard !loggedSession else { return }
+        loggedSession = true
+        let stats = engine.stats
+        let record = SessionRecord(
+            id: UUID(),
+            date: stats.startedAt ?? Date(),
+            shotID: shot.id,
+            shotName: shot.name,
+            integrationSeconds: stats.integrationSeconds,
+            subsAccepted: stats.subsAccepted,
+            subsRejected: stats.subsRejected,
+            nudges: stats.nudges,
+            flapsRecovered: stats.flapsRecovered,
+            targetSubCount: shot.recipe.targetSubCount)
+        SessionStore.shared.save(record, thumbnail: engine.latestPreview)
     }
 
     // MARK: - Header
@@ -344,7 +394,7 @@ private struct PhaseTimeline: View {
             }
             .frame(height: 3)
         }
-        .animation(.easeInOut(duration: 0.6), value: currentIndex)
+        .animation(.spring(duration: 0.6, bounce: 0.3), value: currentIndex)
     }
 
     private func stepCapsule(step: SessionPhase, index: Int) -> some View {

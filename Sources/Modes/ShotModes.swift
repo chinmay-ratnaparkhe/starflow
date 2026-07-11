@@ -13,6 +13,10 @@ public struct ShotModeItem: Identifiable, Sendable {
     public let recipe: CaptureRecipe
     public let expectation: String
     public let tutorial: [TutorialStep]
+    /// Setup checklist rendered as tappable check rows in the mode detail sheet
+    /// (see ModeExtras.swift for the per-mode content). Defaulted so pre-checklist
+    /// call sites keep compiling.
+    public let checklist: [String]
     public let cityViable: Bool
     public let needsGimbal: Bool
     /// Tonight-gate. Call as `shot.feasibility(sky, quality)`.
@@ -20,10 +24,12 @@ public struct ShotModeItem: Identifiable, Sendable {
 
     public init(id: String, name: String, tagline: String, symbol: String,
                 recipe: CaptureRecipe, expectation: String, tutorial: [TutorialStep],
+                checklist: [String] = [],
                 cityViable: Bool, needsGimbal: Bool,
                 feasibility: @escaping @Sendable (SkyContext, SkyQuality) -> Feasibility) {
         self.id = id; self.name = name; self.tagline = tagline; self.symbol = symbol
         self.recipe = recipe; self.expectation = expectation; self.tutorial = tutorial
+        self.checklist = checklist
         self.cityViable = cityViable; self.needsGimbal = needsGimbal
         self.feasibility = feasibility
     }
@@ -75,6 +81,7 @@ public enum ShotModeRegistry {
                     + "nights roughly double the contrast — check tonight's moon before driving out.",
                 symbol: "photo"),
         ],
+        checklist: ModeChecklists.milkyWay,
         cityViable: false,
         needsGimbal: true,
         feasibility: { sky, quality in
@@ -133,6 +140,7 @@ public enum ShotModeRegistry {
                     + "double the sweep.",
                 symbol: "clock"),
         ],
+        checklist: ModeChecklists.starTrails,
         cityViable: true,
         needsGimbal: true,
         feasibility: { sky, _ in
@@ -179,6 +187,7 @@ public enum ShotModeRegistry {
                     + "moon is mushy — atmosphere smears it — so let it climb above about 15° first.",
                 symbol: "photo"),
         ],
+        checklist: ModeChecklists.lunar,
         cityViable: true,
         needsGimbal: true,
         feasibility: { sky, _ in
@@ -229,6 +238,7 @@ public enum ShotModeRegistry {
                     + "timing: an empty result almost always means the pass time was off.",
                 symbol: "photo"),
         ],
+        checklist: ModeChecklists.issPass,
         cityViable: true,
         needsGimbal: true,
         feasibility: { _, _ in
@@ -270,6 +280,7 @@ public enum ShotModeRegistry {
                     + "consider a power bank.",
                 symbol: "battery.50"),
         ],
+        checklist: ModeChecklists.timelapse,
         cityViable: true,
         needsGimbal: true,
         feasibility: { sky, _ in
@@ -312,6 +323,7 @@ public enum ShotModeRegistry {
                     + "gimbal is simply a convenient tripod here.",
                 symbol: "slider.horizontal.3"),
         ],
+        checklist: ModeChecklists.cityscape,
         cityViable: true,
         needsGimbal: false,
         feasibility: { sky, _ in
@@ -356,6 +368,7 @@ public enum ShotModeRegistry {
                     + "best — that's the honest deal.",
                 symbol: "film"),
         ],
+        checklist: ModeChecklists.aurora,
         cityViable: false,
         needsGimbal: false,
         feasibility: { sky, quality in
@@ -409,6 +422,7 @@ public enum ShotModeRegistry {
                     + "game.",
                 symbol: "photo"),
         ],
+        checklist: ModeChecklists.meteors,
         cityViable: false,
         needsGimbal: false,
         feasibility: { sky, quality in
@@ -463,6 +477,7 @@ public enum ShotModeRegistry {
                     + "This is a great first StarFlow shot: short session, forgiving conditions.",
                 symbol: "photo"),
         ],
+        checklist: ModeChecklists.conjunction,
         cityViable: true,
         needsGimbal: true,
         feasibility: { sky, _ in

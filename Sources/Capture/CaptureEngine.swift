@@ -12,6 +12,7 @@ public enum CaptureError: LocalizedError {
     case notAuthorized
     case cameraUnavailable
     case configurationFailed(String)
+    case insufficientStorage(neededBytes: Int64)
 
     public var errorDescription: String? {
         switch self {
@@ -21,6 +22,9 @@ public enum CaptureError: LocalizedError {
             return "The main wide camera is unavailable."
         case .configurationFailed(let detail):
             return "Camera setup failed (\(detail))."
+        case .insufficientStorage(let needed):
+            return "Not enough free space for this session — it needs about "
+                + "\(StorageBudget.format(needed)) plus a safety reserve. Free up storage and try again."
         }
     }
 }
@@ -47,6 +51,12 @@ public enum CaptureError: LocalizedError {
 ///
 /// Thermal and battery state are exposed as published values; the session engine
 /// applies the backoff policy (serious → longer gaps, critical → graceful stop).
+///
+/// Capture intelligence (see ExposurePlanner.swift):
+///  - `start(recipe:quality:)` runs the base recipe through `ExposurePlanner` first.
+///  - Per-frame star-focus telemetry (`focusSharpness` & friends) is computed off the
+///    hot path, so the gapless pacing is untouched.
+///  - `start` refuses up front when `StorageBudget` says the plan can't fit on disk.
 @MainActor
 public final class CaptureEngine: ObservableObject {
 
@@ -64,6 +74,11 @@ public final class CaptureEngine: ObservableObject {
     @Published public private(set) var batteryPercent: Int?
     @Published public private(set) var isCharging = false
     @Published public private(set) var authorizationDenied = false
+    /// Star-focus telemetry (see FocusMetric): variance-of-Laplacian sharpness of the
+    /// newest frame, its rolling mean, and a "focus drifted" alarm. Higher = sharper.
+    @Published public private(set) var focusSharpness: Double?
+    @Published public private(set) var focusSharpnessMean: Double?
+    @Published public private(set) var focusDrifting = false
 
     /// Per-frame delivery. Called on the main actor with each captured sub.
     public var onFrame: ((SubFrame) -> Void)?
@@ -87,6 +102,7 @@ public final class CaptureEngine: ObservableObject {
     private var appliedExposureSeconds: Double = 1.0
     private var appliedISO: Double = 800
     private var observerTokens: [NSObjectProtocol] = []
+    private var focusWindow = RollingSharpness(window: 10)
 
     #if targetEnvironment(simulator)
     private var simTask: Task<Void, Never>?
@@ -109,9 +125,32 @@ public final class CaptureEngine: ObservableObject {
 
     // MARK: - Lifecycle
 
+    /// Run the mode's base recipe through `ExposurePlanner` for the user's sky
+    /// quality, then start the capture loop with the planned exposure/ISO.
+    public func start(recipe: CaptureRecipe, quality: SkyQuality) async throws {
+        try await start(recipe: ExposurePlanner.adjustedRecipe(base: recipe, quality: quality))
+    }
+
+    /// Pre-flight storage verdict for a planned session (UI hook: warn before starting).
+    public nonisolated static func storagePreflight(recipe: CaptureRecipe,
+                                                    keepingSubs: Bool) -> StorageBudget.Verdict {
+        StorageBudget.verdict(
+            freeBytes: StorageBudget.systemFreeBytes(),
+            plannedBytes: StorageBudget.plannedSessionBytes(recipe: recipe,
+                                                            keepingSubs: keepingSubs))
+    }
+
     /// Configure (once) and start the sequential capture loop with the given recipe.
     public func start(recipe: CaptureRecipe) async throws {
         guard !isRunning else { return }
+        // Storage pre-flight: refuse to start a session plan the disk can't hold
+        // ("keep RAW subs" persists ~30 MB per frame — see StorageBudget).
+        let plannedBytes = StorageBudget.plannedSessionBytes(
+            recipe: recipe, keepingSubs: UserDefaults.standard.bool(forKey: "keepSubs"))
+        if case .refuse = StorageBudget.verdict(freeBytes: StorageBudget.systemFreeBytes(),
+                                                plannedBytes: plannedBytes) {
+            throw CaptureError.insufficientStorage(neededBytes: plannedBytes)
+        }
         activeRecipe = recipe
         appliedExposureSeconds = min(recipe.exposureSeconds, 1.0)
         appliedISO = recipe.iso
@@ -119,6 +158,10 @@ public final class CaptureEngine: ObservableObject {
         framesDelivered = 0
         lastFrameAt = nil
         lastGapSeconds = nil
+        focusWindow.reset()
+        focusSharpness = nil
+        focusSharpnessMean = nil
+        focusDrifting = false
 
         #if targetEnvironment(simulator)
         isRunning = true
@@ -213,6 +256,24 @@ public final class CaptureEngine: ObservableObject {
         frameIndex += 1
         framesDelivered += 1
         onFrame?(sub)
+        updateFocusMetric(with: image)
+    }
+
+    /// Focus telemetry runs detached at utility priority: the ~128 px downscale +
+    /// Laplacian never sits between `didFinishCapture` and the next `capturePhoto`,
+    /// so the measured gapless pacing (1.00–1.05 s per frame) stays intact.
+    private func updateFocusMetric(with image: CGImage) {
+        Task.detached(priority: .utility) { [weak self] in
+            guard let sharpness = FocusMetric.sharpness(of: image) else { return }
+            await self?.recordFocusSample(sharpness)
+        }
+    }
+
+    private func recordFocusSample(_ sharpness: Double) {
+        focusWindow.record(sharpness)
+        focusSharpness = sharpness
+        focusSharpnessMean = focusWindow.mean
+        focusDrifting = focusWindow.isDegraded()
     }
 
     // MARK: - Device capture path

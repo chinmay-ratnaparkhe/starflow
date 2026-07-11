@@ -16,6 +16,9 @@ public struct TonightView: View {
     @State private var activeShot: ShotModeItem?
     @State private var startedMount = false
     @State private var lastComputed: Date = .distantPast
+    @State private var outlook: [OutlookNight] = []
+    @State private var outlookDay: Date?
+    @State private var outlookLocation: GeoLocation?
 
     private let sky: SkyComputing = SkyEngine()
 
@@ -36,6 +39,10 @@ public struct TonightView: View {
                         if let ctx = context {
                             verdictCard(ctx: ctx, night: night)
                             skyStrip(ctx: ctx)
+                            if !outlook.isEmpty {
+                                SFSectionLabel("Next 7 nights")
+                                OutlookStrip(nights: outlook)
+                            }
                             SFSectionLabel("Tonight's shots")
                             shotList(ctx: ctx, night: night)
                         } else {
@@ -254,12 +261,26 @@ public struct TonightView: View {
         guard let location else {
             context = nil
             coreWindow = nil
+            outlook = []
+            outlookDay = nil
+            outlookLocation = nil
             return
         }
         let ctx = sky.skyContext(at: location, date: Date())
         context = ctx
         coreWindow = coreVisibilityWindow(location: location, context: ctx)
         lastComputed = Date()
+        recomputeOutlookIfNeeded(location: location)
+    }
+
+    /// The week-ahead strip only shifts once a day (or when the fix moves),
+    /// so skip the 7 × 24 h ephemeris scans on the minute tick.
+    private func recomputeOutlookIfNeeded(location: GeoLocation) {
+        let today = Calendar.current.startOfDay(for: Date())
+        guard outlook.isEmpty || outlookDay != today || outlookLocation != location else { return }
+        outlook = OutlookNight.nextSeven(sky: sky, location: location, from: Date())
+        outlookDay = today
+        outlookLocation = location
     }
 
     /// Samples the core's altitude across tonight's darkness window (15-min steps)

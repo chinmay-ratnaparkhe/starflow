@@ -237,6 +237,101 @@ struct LocationPromptCard: View {
     }
 }
 
+// MARK: - 7-night outlook
+
+/// One night of the week-ahead strip: computed via the sky engine at +1..7 days.
+struct OutlookNight: Identifiable, Equatable {
+    let date: Date
+    let moonFraction: Double     // 0..1 illuminated
+    let coreVisible: Bool        // galactic core clears 10° during darkness
+    let hasDarkness: Bool        // astronomical darkness occurs at all
+
+    var id: TimeInterval { date.timeIntervalSinceReferenceDate }
+
+    /// The next seven nights, one sky context each (pure math, no network).
+    static func nextSeven(sky: SkyComputing, location: GeoLocation, from date: Date) -> [OutlookNight] {
+        (1...7).map { offset in
+            let night = date.addingTimeInterval(Double(offset) * 86_400)
+            let ctx = sky.skyContext(at: location, date: night)
+            return OutlookNight(date: night,
+                                moonFraction: ctx.moon.illuminatedFraction,
+                                coreVisible: ctx.coreVisibleTonight,
+                                hasDarkness: ctx.darknessWindow != nil)
+        }
+    }
+}
+
+/// Horizontally scrolling week-ahead strip: seven small day chips, each with a
+/// core-visibility dot and the moon's illuminated fraction. Night-mode aware.
+@MainActor
+struct OutlookStrip: View {
+    @ObservedObject private var appearance = Appearance.shared
+    let nights: [OutlookNight]
+
+    init(nights: [OutlookNight]) {
+        self.nights = nights
+    }
+
+    var body: some View {
+        let night = appearance.nightMode
+        VStack(alignment: .leading, spacing: 8) {
+            ScrollView(.horizontal) {
+                HStack(spacing: 8) {
+                    ForEach(nights) { entry in
+                        chip(entry, night: night)
+                    }
+                }
+                .padding(.horizontal, 2)
+                .padding(.vertical, 2)
+            }
+            .scrollIndicators(.hidden)
+            Text("Gold dot — the galactic core rides above 10° in darkness that night.")
+                .font(Theme.caption)
+                .foregroundStyle(Theme.secondaryText(night))
+        }
+    }
+
+    private func chip(_ entry: OutlookNight, night: Bool) -> some View {
+        VStack(spacing: 7) {
+            Text(entry.date, format: .dateTime.weekday(.abbreviated))
+                .textCase(.uppercase)
+                .font(Theme.label)
+                .kerning(0.8)
+                .foregroundStyle(Theme.secondaryText(night))
+            Circle()
+                .fill(entry.coreVisible
+                      ? Theme.accent(night)
+                      : Theme.secondaryText(night).opacity(0.25))
+                .frame(width: 7, height: 7)
+            HStack(spacing: 3) {
+                Image(systemName: "moon.fill")
+                    .font(.system(size: 8, weight: .semibold))
+                    .foregroundStyle(Theme.secondaryText(night))
+                Text(TonightFormat.percent(entry.moonFraction))
+                    .font(Theme.liveValue(13))
+                    .foregroundStyle(entry.hasDarkness
+                                     ? Theme.primaryText(night)
+                                     : Theme.secondaryText(night))
+            }
+        }
+        .frame(minWidth: 58)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 10)
+        .background(
+            RoundedRectangle(cornerRadius: 12, style: .continuous)
+                .fill(Theme.cardBg(night))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 12, style: .continuous)
+                        .strokeBorder(
+                            entry.coreVisible
+                                ? Theme.accent(night).opacity(night ? 0.5 : 0.35)
+                                : Theme.accent(night).opacity(night ? 0.35 : 0.14),
+                            lineWidth: 1)
+                )
+        )
+    }
+}
+
 // MARK: - Star field backdrop
 
 /// Subtle deterministic star field behind the Tonight scroll. Night-mode aware.

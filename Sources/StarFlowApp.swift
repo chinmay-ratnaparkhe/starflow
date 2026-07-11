@@ -45,6 +45,8 @@ struct MainTabView: View {
                 .tabItem { Label("Tonight", systemImage: "moon.stars.fill") }
             ModesGalleryView()
                 .tabItem { Label("Shots", systemImage: "camera.aperture") }
+            LogbookView()
+                .tabItem { Label("Logbook", systemImage: "book.closed.fill") }
             LearnView()
                 .tabItem { Label("Learn", systemImage: "book.fill") }
             SettingsView()

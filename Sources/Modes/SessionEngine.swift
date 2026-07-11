@@ -30,6 +30,13 @@ public struct SessionHooks {
     /// Clock + scheduler seams (tests compress time here).
     public var now: @MainActor () -> Date
     public var sleep: (TimeInterval) async throws -> Void
+    /// Storage pre-flight seam: bytes each captured sub is expected to write. Defaults
+    /// to the StorageBudget estimate honoring the "Keep RAW subs" setting; declared
+    /// with a default so the memberwise init above keeps its signature.
+    public var estimatedBytesPerFrame: @MainActor (CaptureRecipe) -> Int64 = { recipe in
+        StorageBudget.estimatedBytesPerFrame(
+            recipe: recipe, keepingSubs: UserDefaults.standard.bool(forKey: "keepSubs"))
+    }
 
     public init(prepareCapture: @escaping (CaptureRecipe) async throws -> (width: Int, height: Int),
                 captureSub: @escaping (CaptureRecipe, Int) async throws -> SubFrame,
@@ -417,6 +424,25 @@ public final class SessionEngine: ObservableObject {
     private func capturePhase(shot: ShotModeItem) async throws {
         phase = .capture
         let recipe = shot.recipe
+
+        // Storage pre-flight: refuse a plan the disk can't hold BEFORE the first frame
+        // (StorageBudget owns the math; hooks.estimatedBytesPerFrame is the seam).
+        // The in-flight guardian below still watches the 1 GB floor during capture.
+        let plannedBytes = StorageBudget.plannedSessionBytes(
+            recipe: recipe, bytesPerFrame: hooks.estimatedBytesPerFrame(recipe))
+        switch StorageBudget.verdict(freeBytes: hooks.freeDiskBytes(), plannedBytes: plannedBytes) {
+        case .refuse:
+            interruption = .storageLow
+            statusDetail = "Not enough free space — this session needs about "
+                + "\(StorageBudget.format(plannedBytes)) plus a safety reserve. "
+                + "Free up storage and try again."
+            throw Halt.graceful
+        case .warn:
+            statusDetail = "Storage is tight — the session may stop early if space runs out."
+        case .ok:
+            break
+        }
+
         let dims = try await hooks.prepareCapture(recipe)
         stacker.reset(width: dims.width, height: dims.height)
         statusDetail = "Capturing…"

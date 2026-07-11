@@ -259,6 +259,10 @@ final class SessionEngineTests: XCTestCase {
         for mode in all {
             XCTAssertEqual(mode.tutorial.count, 4, "\(mode.id) must ship a 4-step tutorial")
             XCTAssertFalse(mode.expectation.isEmpty, "\(mode.id) needs honest expectation copy")
+            XCTAssertGreaterThanOrEqual(mode.checklist.count, 4,
+                                        "\(mode.id) must ship a setup checklist")
+            XCTAssertFalse(mode.checklist.contains(where: \.isEmpty),
+                           "\(mode.id): checklist rows must not be blank")
             XCTAssertLessThanOrEqual(mode.recipe.exposureSeconds, 1.0,
                                      "\(mode.id): 1 s is the hard third-party exposure cap")
             XCTAssertGreaterThan(mode.recipe.targetSubCount, 0)
