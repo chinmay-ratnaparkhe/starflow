@@ -55,6 +55,18 @@ public final class MountService: ObservableObject, MountControlling {
 
     public static let shared = MountService()
 
+    /// True when mount data comes from the in-process `SimulatedGimbal` — i.e. simulator
+    /// builds, or platforms where DockKit cannot be imported at all. Device builds with
+    /// DockKit ALWAYS report false: they drive the real accessory. The UI keys the rose
+    /// "SIMULATED" badge off this so fake data can never masquerade as real telemetry.
+    public static var isSimulated: Bool {
+        #if canImport(DockKit) && !targetEnvironment(simulator)
+        return false
+        #else
+        return true
+        #endif
+    }
+
     // MARK: Observable state
 
     @Published public private(set) var connection: MountConnection = .searching
@@ -84,6 +96,9 @@ public final class MountService: ObservableObject, MountControlling {
 
     #if canImport(DockKit) && !targetEnvironment(simulator)
     private var accessory: DockAccessory?
+    private var batteryTask: Task<Void, Never>?
+    /// Latest gimbal battery % from `batteryStates`, folded into each telemetry sample.
+    private var lastBatteryPercent: Int?
     #else
     private let sim = SimulatedGimbal()
     #endif
@@ -397,12 +412,19 @@ public final class MountService: ObservableObject, MountControlling {
                 if case .docked = connection { alreadyDocked = true } else { alreadyDocked = false }
                 if !alreadyDocked {
                     startHardwareTelemetry(acc)
-                    handleDocked(name: "Flow 2 Pro")
+                    startHardwareBattery(acc)
+                    // Real accessory-reported name (e.g. "Insta360 Flow 2 Pro") — the
+                    // "(Simulated)" suffix exists only in simulator builds.
+                    let name = acc.identifier.name
+                    handleDocked(name: name.isEmpty ? "DockKit gimbal" : name)
                 }
             }
         default:
             telemetryTask?.cancel()
             telemetryTask = nil
+            batteryTask?.cancel()
+            batteryTask = nil
+            lastBatteryPercent = nil
             handleUndocked()
         }
     }
@@ -416,11 +438,38 @@ public final class MountService: ObservableObject, MountControlling {
                     let pos = motion.angularPositions
                     self.ingestEncoderSample(pitchDeg: pos.x * 180.0 / .pi,
                                              yawDeg: pos.y * 180.0 / .pi,
-                                             batteryPercent: nil)
+                                             batteryPercent: self.lastBatteryPercent)
                 }
             } catch {
                 // Stream ends on undock; the state-change machine handles recovery.
             }
+        }
+    }
+
+    /// Real gimbal battery: fold `batteryStates` updates into `MountTelemetry.batteryPercent`.
+    private func startHardwareBattery(_ acc: DockAccessory) {
+        batteryTask?.cancel()
+        batteryTask = Task { [weak self] in
+            do {
+                for try await battery in try acc.batteryStates {
+                    guard let self, !Task.isCancelled else { break }
+                    // DockKit reports charge as a 0…1 fraction.
+                    let percent = max(0, min(100, Int((battery.batteryLevel * 100).rounded())))
+                    self.ingestBatterySample(percent: percent)
+                }
+            } catch {
+                // Stream ends on undock; the state-change machine handles recovery.
+            }
+        }
+    }
+
+    private func ingestBatterySample(percent: Int) {
+        lastBatteryPercent = percent
+        // Publish immediately if telemetry already exists; otherwise the next encoder
+        // sample carries it. Never bumps sampleCounter — battery is not a fresh encoder read.
+        if var current = telemetry, current.batteryPercent != percent {
+            current.batteryPercent = percent
+            telemetry = current
         }
     }
 

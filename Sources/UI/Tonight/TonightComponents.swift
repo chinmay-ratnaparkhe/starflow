@@ -69,6 +69,30 @@ struct FeasibilityBadge: View {
     }
 }
 
+// MARK: - Simulated-source badge
+
+/// Unmistakable rose "SIMULATED" pill. Pin it to any UI element whose data comes from
+/// a simulated source (`MountService.isSimulated` — simulator builds only), so fake
+/// readings can never masquerade as real hardware. Deliberately NOT night-mode tinted:
+/// it must stand out in every appearance.
+@MainActor
+struct SimulatedSourceBadge: View {
+    init() {}
+
+    var body: some View {
+        Text("SIMULATED")
+            .font(Theme.label)
+            .kerning(1.0)
+            .foregroundStyle(Theme.rose)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .background(Capsule().fill(Theme.rose.opacity(0.16)))
+            .overlay(Capsule().strokeBorder(Theme.rose.opacity(0.5), lineWidth: 1))
+            .fixedSize()
+            .accessibilityLabel("Simulated data source")
+    }
+}
+
 // MARK: - Formatting helpers
 
 enum TonightFormat {
@@ -158,9 +182,13 @@ struct GimbalStatusRibbon: View {
                         .fixedSize(horizontal: false, vertical: true)
                 }
                 Spacer(minLength: 0)
+                if MountService.isSimulated {
+                    SimulatedSourceBadge()
+                }
             }
             .accessibilityElement(children: .ignore)
-            .accessibilityLabel("Gimbal status: \(s.title). \(s.detail)")
+            .accessibilityLabel("Gimbal status: \(s.title). \(s.detail)"
+                                + (MountService.isSimulated ? " Simulated data source." : ""))
         }
     }
 

@@ -9,6 +9,11 @@ struct StarFlowApp: App {
         WindowGroup {
             RootView(hasOnboarded: $hasOnboarded)
                 .preferredColorScheme(.dark)
+                // Start the mount monitor at app appear — on device this opens the real
+                // DockKit accessory-state stream immediately, so the gimbal ribbon,
+                // Settings row, and battery telemetry are live before any session starts.
+                // Idempotent: MountService.start() guards against double-starts.
+                .task { MountService.shared.start() }
         }
         .onChange(of: scenePhase) { _, phase in
             if phase != .active {

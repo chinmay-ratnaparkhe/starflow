@@ -244,6 +244,7 @@ public enum SessionInterruption: Equatable, Sendable {
     case batteryLow(percent: Int)
     case storageLow
     case backgrounded
+    case cameraDenied             // camera permission missing/denied — never go synthetic
 }
 
 public struct SessionStats: Sendable {

@@ -37,6 +37,11 @@ public struct SessionHooks {
         StorageBudget.estimatedBytesPerFrame(
             recipe: recipe, keepingSubs: UserDefaults.standard.bool(forKey: "keepSubs"))
     }
+    /// True when the capture closures synthesize frames instead of driving real camera
+    /// hardware (simulator builds only). The UI badges everything derived from a
+    /// simulated source with a "SIMULATED" pill so fake stars can never masquerade as
+    /// real data. Declared with a default so the memberwise init keeps its signature.
+    public var isSimulatedCapture: Bool = false
 
     public init(prepareCapture: @escaping (CaptureRecipe) async throws -> (width: Int, height: Int),
                 captureSub: @escaping (CaptureRecipe, Int) async throws -> SubFrame,
@@ -61,12 +66,20 @@ public struct SessionHooks {
 
 public extension SessionHooks {
 
-    /// Default hooks. Guardians read real system state; capture synthesizes drifting
-    /// starfield frames (simulator-safe). The Capture module bridges the real
-    /// `CaptureEngine` by replacing `SessionEngine.defaultHooksProvider` with a set
-    /// whose prepare/capture/end closures call into it.
+    /// Default hooks. Guardians read real system state on every platform.
+    ///
+    /// Capture routing (the rule that keeps field sessions honest):
+    ///  - DEVICE builds drive the REAL bench-proven `CaptureEngine` through
+    ///    `CaptureEngineBridge` — permission is ensured at session start (reusing the
+    ///    onboarding grant, or prompting on first use), the AVCaptureSession runs for
+    ///    exactly the Capture→Develop window (iOS shows the green camera dot), and every
+    ///    SubFrame carries a real sensor CGImage. There is NO synthetic fallback here;
+    ///    if the camera can't run, the error surfaces as a session interruption.
+    ///  - SIMULATOR builds (no camera hardware exists) synthesize drifting starfield
+    ///    frames and set `isSimulatedCapture` so the UI badges everything "SIMULATED".
     static func live() -> SessionHooks {
-        SessionHooks(
+        #if targetEnvironment(simulator)
+        var hooks = SessionHooks(
             prepareCapture: { _ in (SessionHooks.syntheticSize, SessionHooks.syntheticSize) },
             captureSub: { recipe, index in
                 // Pace the synthetic capture like a real exposure so the session feels honest.
@@ -87,6 +100,32 @@ public extension SessionHooks {
             sleep: { seconds in
                 try await Task.sleep(nanoseconds: UInt64(max(0, seconds) * 1_000_000_000))
             })
+        hooks.isSimulatedCapture = true
+        return hooks
+        #else
+        return SessionHooks(
+            prepareCapture: { recipe in
+                try await CaptureEngineBridge.prepare(recipe: recipe)
+            },
+            captureSub: { recipe, index in
+                try await CaptureEngineBridge.captureSub(recipe: recipe, index: index)
+            },
+            endCapture: {
+                await CaptureEngineBridge.teardown()
+            },
+            thermalState: { ProcessInfo.processInfo.thermalState },
+            batteryPercent: { SessionHooks.systemBatteryPercent() },
+            freeDiskBytes: { SessionHooks.systemFreeDiskBytes() },
+            nudgeVector: {
+                // Worst-case measured sky drift, fed forward along yaw once per cadence.
+                let yaw = GimbalConstants.skyDriftDegPerMin * GimbalConstants.nudgeCadence / 60.0
+                return (deltaPitchDeg: 0, deltaYawDeg: yaw)
+            },
+            now: { Date() },
+            sleep: { seconds in
+                try await Task.sleep(nanoseconds: UInt64(max(0, seconds) * 1_000_000_000))
+            })
+        #endif
     }
 
     // MARK: System guardians
@@ -199,10 +238,15 @@ public final class SessionEngine: ObservableObject {
         return min(1, Double(stats.subsAccepted + stats.subsRejected) / Double(target))
     }
 
+    /// True when this session's frames come from a synthetic capture source
+    /// (simulator builds only). The UI shows a rose "SIMULATED" pill wherever this
+    /// engine's data is rendered so fake stars can never masquerade as real ones.
+    public var captureSourceIsSimulated: Bool { hooks.isSimulatedCapture }
+
     // MARK: Dependencies
 
-    /// Replace at app assembly to bridge the real CaptureEngine into new sessions
-    /// (e.g. `SessionEngine.defaultHooksProvider = { CaptureEngineBridge.hooks() }`).
+    /// Test/preview seam. `SessionHooks.live()` already routes to the real
+    /// `CaptureEngine` on device builds — no assembly-time replacement is needed.
     public static var defaultHooksProvider: () -> SessionHooks = { SessionHooks.live() }
 
     private let mount: MountControlling
@@ -452,7 +496,23 @@ public final class SessionEngine: ObservableObject {
             break
         }
 
-        let dims = try await hooks.prepareCapture(recipe)
+        // Bring the capture pipeline up. On device this requests camera permission
+        // (or reuses the onboarding grant) and starts the real AVCaptureSession —
+        // a denial or hardware failure must surface loudly, never fall back to
+        // synthetic frames.
+        let dims: (width: Int, height: Int)
+        do {
+            dims = try await hooks.prepareCapture(recipe)
+        } catch CaptureError.notAuthorized {
+            interruption = .cameraDenied
+            statusDetail = "Camera access is off — StarFlow can't capture stars without it. "
+                + "Enable Camera for StarFlow in Settings, then start the session again."
+            throw Halt.graceful
+        } catch let error as CaptureError {
+            if case .insufficientStorage = error { interruption = .storageLow }
+            statusDetail = error.errorDescription ?? "Camera setup failed."
+            throw Halt.graceful
+        }
         stacker.reset(width: dims.width, height: dims.height)
         statusDetail = "Capturing…"
 

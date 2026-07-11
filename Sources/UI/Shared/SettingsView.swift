@@ -164,6 +164,9 @@ struct SettingsView: View {
             Text(state.text)
                 .font(Theme.body)
                 .foregroundStyle(Theme.primaryText(night))
+            if MountService.isSimulated {
+                SimulatedSourceBadge()
+            }
             Spacer()
             if let percent = mount.telemetry?.batteryPercent {
                 Text("\(percent)% battery")
@@ -177,8 +180,9 @@ struct SettingsView: View {
     }
 
     private func connectionAccessibilityLabel(_ status: String, battery: Int?) -> String {
-        guard let battery else { return "Gimbal: \(status)" }
-        return "Gimbal: \(status), battery \(battery) percent"
+        let simulatedSuffix = MountService.isSimulated ? " Simulated data source." : ""
+        guard let battery else { return "Gimbal: \(status).\(simulatedSuffix)" }
+        return "Gimbal: \(status), battery \(battery) percent.\(simulatedSuffix)"
     }
 
     // MARK: - About

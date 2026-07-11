@@ -190,6 +190,10 @@ public final class CaptureEngine: ObservableObject {
         simTask?.cancel()
         simTask = nil
         #else
+        // Disown any in-flight capture so its late completion can't leak a stale
+        // frame (or clobber `captureInFlight`) into a session started after us.
+        proxies.removeAll()
+        captureInFlight = false
         sessionQueue.async { [session = self.session] in
             if session.isRunning { session.stopRunning() }
         }
@@ -426,7 +430,9 @@ public final class CaptureEngine: ObservableObject {
     }
 
     private func finishCapture(id: Int64, image: CGImage?, error: Error?) {
-        proxies.removeValue(forKey: id)
+        // A completion whose proxy was already disowned belongs to a stopped
+        // session — ignore it entirely (its frame must not enter a newer stack).
+        guard proxies.removeValue(forKey: id) != nil else { return }
         captureInFlight = false
         guard isRunning else { return }
         if error == nil { deliver(image: image) }
@@ -463,8 +469,11 @@ public final class CaptureEngine: ObservableObject {
             guard error == nil else { return }
             // The Bayer RAW plane arrives here too (photo.isRawPhoto == true);
             // v1 stacks the processed twin. RAW persistence lands in a later round.
+            // Fall back to the embedded preview if the full-size CGImage is
+            // unavailable — a real (smaller) sensor image beats a dropped frame.
             if !photo.isRawPhoto, processedImage == nil {
                 processedImage = photo.cgImageRepresentation()
+                    ?? photo.previewCGImageRepresentation()
             }
         }
 
@@ -580,3 +589,114 @@ public final class CaptureEngine: ObservableObject {
 
     #endif
 }
+
+// MARK: - CaptureEngineBridge (device builds)
+
+#if !targetEnvironment(simulator)
+
+/// Adapts the push-based `CaptureEngine` (frames arrive via `onFrame`) to the
+/// pull-based `SessionHooks` seam (`captureSub` awaits one frame at a time).
+///
+/// `SessionHooks.live()` routes here on device builds, so a session's Capture phase
+/// drives the REAL camera end-to-end:
+///  - `prepare` ensures camera permission (reusing the onboarding grant, or prompting
+///    on first use — a denial throws `CaptureError.notAuthorized`, it never goes
+///    synthetic), configures the bench-proven pipeline (custom exposure from the
+///    recipe, ZSL off, sequential captures chained from `didFinishCapture`), starts
+///    the `AVCaptureSession` (iOS shows the green camera-active dot), and awaits the
+///    first real frame to learn the true sensor dimensions for the stacker.
+///  - `captureSub` hands each real `SubFrame` (sensor CGImage included) to the
+///    session engine; a 1-frame newest-wins buffer means a frame exposed during a
+///    gimbal nudge is simply superseded rather than queued.
+///  - `teardown` stops the session on every exit path (develop / complete / abort),
+///    which turns the green dot off.
+@MainActor
+public enum CaptureEngineBridge {
+
+    private static var continuation: AsyncStream<SubFrame>.Continuation?
+    private static var iterator: AsyncStream<SubFrame>.Iterator?
+    /// First real frame, captured during `prepare` to learn the true sensor
+    /// dimensions; handed to the first `captureSub` so no exposure is wasted.
+    private static var primedFrame: SubFrame?
+
+    /// Ensure authorization, start the real camera, and return the live-stack grid
+    /// dimensions for the stacker — the true sensor aspect ratio (measured from the
+    /// first delivered frame) bounded to `liveStackMaxSide`, because `CPUStacker`
+    /// rescales every full-size photo into the reset grid and must keep pace with
+    /// the 1 s capture cadence.
+    public static func prepare(recipe: CaptureRecipe) async throws -> (width: Int, height: Int) {
+        await teardown()   // idempotent clean slate if a previous session leaked
+        let engine = CaptureEngine.shared
+        let (stream, cont) = AsyncStream.makeStream(of: SubFrame.self,
+                                                    bufferingPolicy: .bufferingNewest(1))
+        continuation = cont
+        iterator = stream.makeAsyncIterator()
+        engine.onFrame = { frame in _ = cont.yield(frame) }
+        do {
+            try await engine.start(recipe: recipe)
+            let first = try await nextFrame()
+            guard let image = first.pixelData else {
+                throw CaptureError.configurationFailed("first frame carried no image data")
+            }
+            primedFrame = first
+            return liveStackGrid(width: image.width, height: image.height)
+        } catch {
+            await teardown()
+            throw error
+        }
+    }
+
+    /// Longest side of the live-stack grid. Full 12 MP registration per sub would
+    /// starve the capture cadence; ~1 MP preserves plenty of stars for alignment.
+    private static let liveStackMaxSide = 1024
+
+    private static func liveStackGrid(width: Int, height: Int) -> (width: Int, height: Int) {
+        let longest = max(width, height)
+        guard longest > liveStackMaxSide, longest > 0 else {
+            return (max(1, width), max(1, height))
+        }
+        let scale = Double(liveStackMaxSide) / Double(longest)
+        return (max(1, Int((Double(width) * scale).rounded())),
+                max(1, Int((Double(height) * scale).rounded())))
+    }
+
+    /// Await the next real sub-exposure, re-indexed to the session's own counter.
+    public static func captureSub(recipe: CaptureRecipe, index: Int) async throws -> SubFrame {
+        var frame: SubFrame
+        if let primed = primedFrame {
+            primedFrame = nil
+            frame = primed
+        } else {
+            frame = try await nextFrame()
+        }
+        frame.index = index
+        return frame
+    }
+
+    /// Stop the camera (green dot off) and release the frame stream. Any
+    /// `captureSub` still awaiting a frame is resumed with `CancellationError`.
+    public static func teardown() async {
+        let engine = CaptureEngine.shared
+        engine.onFrame = nil
+        engine.stop()
+        continuation?.finish()
+        continuation = nil
+        iterator = nil
+        primedFrame = nil
+    }
+
+    private static func nextFrame() async throws -> SubFrame {
+        guard var pending = iterator else {
+            throw CaptureError.configurationFailed("capture pipeline is not running")
+        }
+        // Await on a LOCAL copy: AsyncStream iterators share their underlying
+        // storage, and the local avoids an exclusivity conflict if `teardown()`
+        // clears `iterator` while this await is suspended.
+        guard let frame = await pending.next() else {
+            throw CancellationError()   // stream finished (teardown / abort)
+        }
+        return frame
+    }
+}
+
+#endif

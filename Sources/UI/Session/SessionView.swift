@@ -86,7 +86,14 @@ struct SessionView: View {
                 SFCard { PhaseTimeline(phase: phase, night: night) }
 
                 if phase == .complete {
+                    // A guardian stop reason (thermal, battery, camera denied…) must
+                    // stay visible on the landing report — never end silently.
+                    if let interruption = engine.interruption {
+                        GuardianBanner(interruption: interruption, night: night)
+                            .transition(.move(edge: .top).combined(with: .opacity))
+                    }
                     LandingReport(shot: shot, stats: stats, preview: engine.latestPreview,
+                                  simulated: engine.captureSourceIsSimulated,
                                   night: night, onNewSession: { dismiss() })
                         .transition(.asymmetric(
                             insertion: .scale(scale: 0.94).combined(with: .opacity),
@@ -237,7 +244,12 @@ struct SessionView: View {
                 }
             }
             Spacer(minLength: 8)
-            phaseBadge(phase, night: night)
+            VStack(alignment: .trailing, spacing: 6) {
+                phaseBadge(phase, night: night)
+                if engine.captureSourceIsSimulated {
+                    SimulatedBadge()
+                }
+            }
         }
     }
 
@@ -293,7 +305,13 @@ struct SessionView: View {
     private func previewCard(phase: SessionPhase, stats: SessionStats, preview: CGImage?, night: Bool) -> some View {
         SFCard {
             VStack(alignment: .leading, spacing: 10) {
-                SFSectionLabel("Live stack")
+                HStack {
+                    SFSectionLabel("Live stack")
+                    Spacer()
+                    if engine.captureSourceIsSimulated {
+                        SimulatedBadge()
+                    }
+                }
                 ZStack {
                     if let preview {
                         Image(decorative: preview, scale: 1)
@@ -340,6 +358,15 @@ struct SessionView: View {
         let heat = thermal
         return SFCard {
             VStack(spacing: 14) {
+                if MountService.isSimulated {
+                    HStack(spacing: 8) {
+                        SimulatedSourceBadge()
+                        Text("Gimbal readings come from the simulated mount.")
+                            .font(Theme.caption)
+                            .foregroundStyle(Theme.secondaryText(night))
+                        Spacer(minLength: 0)
+                    }
+                }
                 HStack(spacing: 8) {
                     SFStatChip(symbol: "battery.75", value: gimbalBattery, label: "gimbal")
                     SFStatChip(symbol: "iphone", value: phoneBattery, label: "phone")
@@ -575,7 +602,33 @@ private struct GuardianBanner: View {
                     "Paused in background",
                     "Capture pauses while StarFlow is backgrounded. Come back to resume — the stack is safe.",
                     Theme.warning(night))
+        case .cameraDenied:
+            return ("camera.badge.ellipsis",
+                    "Camera access needed",
+                    "StarFlow can't capture stars without the camera — and it never fakes them. Enable Camera for StarFlow in Settings, then start the session again.",
+                    Theme.danger(night))
         }
+    }
+}
+
+// MARK: - Simulated-source badge
+
+/// Unmistakable rose "SIMULATED" pill shown wherever a simulated capture source is
+/// active (simulator builds), so synthetic stars can never masquerade as real data.
+struct SimulatedBadge: View {
+    var body: some View {
+        Text("SIMULATED")
+            .font(Theme.label)
+            .kerning(1.2)
+            .foregroundStyle(Theme.rose)
+            .padding(.horizontal, 10)
+            .padding(.vertical, 5)
+            .background(
+                Capsule()
+                    .fill(Theme.rose.opacity(0.16))
+                    .overlay(Capsule().strokeBorder(Theme.rose.opacity(0.55), lineWidth: 1))
+            )
+            .accessibilityLabel("Simulated data source")
     }
 }
 
@@ -585,6 +638,7 @@ private struct LandingReport: View {
     let shot: ShotModeItem
     let stats: SessionStats
     let preview: CGImage?
+    let simulated: Bool
     let night: Bool
     let onNewSession: () -> Void
 
@@ -598,6 +652,10 @@ private struct LandingReport: View {
                         Text("Session complete")
                             .font(Theme.title)
                             .foregroundStyle(Theme.primaryText(night))
+                        if simulated {
+                            Spacer(minLength: 4)
+                            SimulatedBadge()
+                        }
                     }
                     HStack(alignment: .firstTextBaseline, spacing: 8) {
                         Text(sessionClock(stats.integrationSeconds))
@@ -638,6 +696,9 @@ private struct LandingReport: View {
                             .frame(maxWidth: .infinity)
                             .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
                             .colorMultiply(night ? Theme.nightRed : .white)
+                            .overlay(alignment: .topTrailing) {
+                                if simulated { SimulatedBadge().padding(8) }
+                            }
                         ShareLink(item: image,
                                   preview: SharePreview("StarFlow — \(shot.name)", image: image)) {
                             Label("Share the stack", systemImage: "square.and.arrow.up")
