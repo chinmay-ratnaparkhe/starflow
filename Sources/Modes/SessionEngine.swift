@@ -331,7 +331,12 @@ public final class SessionEngine: ObservableObject {
             try await calibratePhase(shot: shot)
             try await capturePhase(shot: shot)
         } catch is CancellationError {
-            return   // abort() already finalized state and stopped the mount
+            // Our own cancellation: abort() already finalized state and stopped the mount.
+            // A cancellation that leaked from a dependency while the session is still live
+            // (generation unchanged, task not cancelled) must NOT strand a zombie session —
+            // fall through and save the partial stack instead.
+            guard gen == generation, !Task.isCancelled else { return }
+            statusDetail = "Capture hit a problem — saving the partial stack."
         } catch {
             // Halt.graceful (guardians) or an unexpected capture error: save what we have.
             guard gen == generation else { return }
@@ -408,7 +413,11 @@ public final class SessionEngine: ObservableObject {
             try await mount.nudge(deltaPitchDeg: 0, deltaYawDeg: GimbalConstants.nudgeTargetDeg)
             try await mount.nudge(deltaPitchDeg: 0, deltaYawDeg: -GimbalConstants.nudgeTargetDeg)
         } catch is CancellationError {
-            throw CancellationError()
+            // Propagate only our own cancellation (abort). A motion plan cancelled under
+            // us (undock or backgrounding zeroes the motors mid-nudge) must not end the
+            // session — the pause/flap gateway picks it up on the next pass.
+            try Task.checkCancellation()
+            statusDetail = "Calibration interrupted — continuing."
         } catch {
             statusDetail = "Calibration nudge refused (envelope edge?) — continuing without it."
         }
@@ -635,7 +644,11 @@ public final class SessionEngine: ObservableObject {
             stats.nudges += 1
             netYawDeg += v.deltaYawDeg
         } catch is CancellationError {
-            throw CancellationError()
+            // Propagate only our own cancellation (abort). A motion plan cancelled under
+            // us (undock or backgrounding zeroes the motors mid-nudge) must not end the
+            // session — the pause/flap gateway picks it up on the next loop pass.
+            try Task.checkCancellation()
+            statusDetail = "Nudge interrupted — holding framing."
         } catch {
             statusDetail = "Nudge refused (pitch envelope?) — continuing without it."
         }

@@ -165,6 +165,20 @@ private struct LogbookCard: View {
             }
         }
         .buttonStyle(.plain)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(accessibilitySummary)
+        .accessibilityHint("Opens the full landing report.")
+        .accessibilityAddTraits(.isButton)
+    }
+
+    /// "Milky Way Stack, Jul 9, 12 minutes 30 seconds integrated, 300 subs".
+    private var accessibilitySummary: String {
+        var summary = "\(record.shotName), "
+            + record.date.formatted(date: .abbreviated, time: .shortened)
+            + ", \(TonightFormat.spokenDuration(record.integrationSeconds)) integrated"
+            + ", \(record.subsAccepted) subs"
+        if record.endedEarly { summary += ", ended early" }
+        return summary
     }
 
     @ViewBuilder
@@ -252,6 +266,8 @@ private struct LogbookDetailSheet: View {
                         .font(Theme.caption)
                         .foregroundStyle(Theme.secondaryText(night))
                 }
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel("Integrated \(TonightFormat.spokenDuration(record.integrationSeconds))")
                 if record.endedEarly {
                     Text("Ended early — \(record.subsAccepted + record.subsRejected) of "
                          + "\(record.targetSubCount) planned subs. Everything captured was kept.")
@@ -359,5 +375,6 @@ private struct LogbookDetailSheet: View {
         }
         .foregroundStyle(Theme.danger(night))
         .background(Capsule().strokeBorder(Theme.danger(night).opacity(0.45), lineWidth: 1))
+        .accessibilityHint("Removes this session from the logbook. This cannot be undone.")
     }
 }

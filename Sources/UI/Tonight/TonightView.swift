@@ -172,13 +172,14 @@ public struct TonightView: View {
                 } label: {
                     Text("Set up this shot")
                         .font(Theme.headline)
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 11)
+                        .frame(maxWidth: .infinity, minHeight: 44)
                 }
                 .buttonStyle(.plain)
                 .foregroundStyle(tint)
                 .background(Capsule().fill(tint.opacity(0.14)))
                 .overlay(Capsule().strokeBorder(tint.opacity(0.35), lineWidth: 1))
+                .accessibilityLabel("Set up \(entry.item.name)")
+                .accessibilityHint("Starts a guided \(entry.item.name) session.")
             }
         }
     }

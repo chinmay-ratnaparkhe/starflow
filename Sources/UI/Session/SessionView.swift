@@ -17,6 +17,7 @@ struct SessionView: View {
     @State private var showEndDialog = false
     @State private var abortOnExit = false
     @State private var loggedSession = false
+    @State private var showGimbalSchool = false
 
     init(shot: ShotModeItem) {
         self.shot = shot
@@ -54,6 +55,9 @@ struct SessionView: View {
                 logSessionIfNeeded()
             }
         }
+        .sheet(isPresented: $showGimbalSchool) {
+            gimbalSchoolSheet(night: night)
+        }
         .confirmationDialog("Stop this session?", isPresented: $showEndDialog, titleVisibility: .visible) {
             Button("Stop & develop the stack") {
                 SessionEngine.shared.abort()
@@ -89,6 +93,10 @@ struct SessionView: View {
                             removal: .opacity))
                 } else {
                     Group {
+                        if phase == .connect && shot.needsGimbal && !gimbalDocked {
+                            gimbalWaitCard(night: night)
+                                .transition(.move(edge: .top).combined(with: .opacity))
+                        }
                         heroCard(stats: stats, night: night)
                         previewCard(phase: phase, stats: stats, preview: engine.latestPreview, night: night)
                         telemetryCard(stats: stats, phase: phase, night: night)
@@ -140,6 +148,73 @@ struct SessionView: View {
             flapsRecovered: stats.flapsRecovered,
             targetSubCount: shot.recipe.targetSubCount)
         SessionStore.shared.save(record, thumbnail: engine.latestPreview)
+    }
+
+    // MARK: - Gimbal never docks: guide card + school sheet
+
+    private var gimbalDocked: Bool {
+        if case .docked = engine.mountConnection { return true }
+        return false
+    }
+
+    private func gimbalWaitCard(night: Bool) -> some View {
+        SFCard(accent: Theme.warning(night)) {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(spacing: 10) {
+                    Image(systemName: "magnifyingglass")
+                        .font(.system(size: 20, weight: .medium))
+                        .foregroundStyle(Theme.warning(night))
+                    Text("Waiting for the gimbal")
+                        .font(Theme.headline)
+                        .foregroundStyle(Theme.primaryText(night))
+                }
+                Text("This shot drives the Flow 2 Pro's motors. Power the gimbal on and dock your iPhone — the session continues by itself the moment it connects.")
+                    .font(Theme.body)
+                    .foregroundStyle(Theme.secondaryText(night))
+                    .fixedSize(horizontal: false, vertical: true)
+                Button {
+                    showGimbalSchool = true
+                } label: {
+                    Label("Open gimbal school", systemImage: "hand.tap.fill")
+                        .font(Theme.headline)
+                        .frame(maxWidth: .infinity, minHeight: 44)
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(Theme.accent(night))
+                .background(
+                    Capsule()
+                        .fill(Theme.accent(night).opacity(0.12))
+                        .overlay(Capsule().strokeBorder(Theme.accent(night).opacity(0.4), lineWidth: 1))
+                )
+                .accessibilityHint("Shows the four-step gimbal setup lesson.")
+            }
+        }
+    }
+
+    private func gimbalSchoolSheet(night: Bool) -> some View {
+        NavigationStack {
+            ZStack {
+                Theme.screenBg(night).ignoresSafeArea()
+                ScrollView {
+                    VStack(alignment: .leading, spacing: 16) {
+                        Text("The two-minute gimbal school. The trigger squeeze is the one everyone forgets.")
+                            .font(Theme.body)
+                            .foregroundStyle(Theme.secondaryText(night))
+                        GimbalSchoolView()
+                    }
+                    .padding(20)
+                }
+            }
+            .navigationTitle("Gimbal school")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .topBarTrailing) {
+                    Button("Done") { showGimbalSchool = false }
+                        .foregroundStyle(Theme.accent(night))
+                }
+            }
+        }
+        .preferredColorScheme(.dark)
     }
 
     // MARK: - Header
@@ -195,8 +270,11 @@ struct SessionView: View {
                         .font(Theme.caption)
                         .foregroundStyle(Theme.secondaryText(night))
                 }
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel("Integration \(TonightFormat.spokenDuration(stats.integrationSeconds))")
                 ProgressView(value: progress)
                     .tint(Theme.accent(night))
+                    .accessibilityLabel("Capture progress")
                 HStack(spacing: 8) {
                     SFStatChip(symbol: "checkmark.circle", value: "\(stats.subsAccepted)",
                                label: "accepted", tint: Theme.positive(night))
@@ -343,6 +421,7 @@ struct SessionView: View {
                     .overlay(Capsule().strokeBorder(Theme.danger(night).opacity(0.45), lineWidth: 1))
             )
             .padding(.top, 4)
+            .accessibilityHint("Asks to confirm before ending the session. Everything captured is kept.")
         }
     }
 }
@@ -528,6 +607,8 @@ private struct LandingReport: View {
                             .font(Theme.caption)
                             .foregroundStyle(Theme.secondaryText(night))
                     }
+                    .accessibilityElement(children: .ignore)
+                    .accessibilityLabel("Total integration \(TonightFormat.spokenDuration(stats.integrationSeconds))")
                     HStack(spacing: 8) {
                         SFStatChip(symbol: "square.stack.3d.up.fill", value: "\(stats.subsAccepted)",
                                    label: "subs stacked", tint: Theme.positive(night))
@@ -584,6 +665,7 @@ private struct LandingReport: View {
             }
             .foregroundStyle(Theme.accent(night))
             .background(Capsule().strokeBorder(Theme.accent(night).opacity(0.5), lineWidth: 1))
+            .accessibilityHint("Closes this report and returns to the shot list.")
         }
     }
 }

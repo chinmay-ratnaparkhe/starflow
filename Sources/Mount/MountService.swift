@@ -372,7 +372,14 @@ public final class MountService: ObservableObject, MountControlling {
                     self.applyStateChange(change)
                 }
             } catch {
-                self?.connection = .undocked
+                guard let self else { return }
+                if case .docked = self.connection {
+                    // Stream died mid-dock: zero the motors and run the normal
+                    // flap debounce, exactly like any other undock.
+                    self.handleUndocked()
+                } else {
+                    self.connection = .undocked
+                }
             }
         }
     }

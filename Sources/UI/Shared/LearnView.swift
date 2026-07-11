@@ -1,6 +1,7 @@
 import SwiftUI
 
-/// Learn tab: every shot mode's tutorial, plus a glossary of the words the app uses.
+/// Learn tab: every shot mode's tutorial, the field-guide articles, plus a
+/// glossary of the words the app uses.
 struct LearnView: View {
     @ObservedObject private var appearance = Appearance.shared
 
@@ -27,6 +28,20 @@ struct LearnView: View {
                                     ModeRow(item: item, night: night)
                                 }
                                 .buttonStyle(.plain)
+                                .accessibilityHint("Opens the \(item.name) tutorial.")
+                            }
+                        }
+
+                        VStack(alignment: .leading, spacing: 10) {
+                            SFSectionLabel("Field guide")
+                            ForEach(FieldGuideLibrary.all) { article in
+                                NavigationLink {
+                                    FieldGuideArticleView(article: article)
+                                } label: {
+                                    FieldGuideRow(article: article, night: night)
+                                }
+                                .buttonStyle(.plain)
+                                .accessibilityHint("Opens the \(article.title) article.")
                             }
                         }
 
@@ -280,4 +295,20 @@ private let glossaryTerms: [GlossaryTerm] = [
                  definition: "Working out exactly where a photo points by matching its star pattern to a catalog — how a mount verifies aim without you squinting through it."),
     GlossaryTerm(term: "NPF",
                  definition: "A rule for the longest untracked exposure before stars streak, computed from aperture, pixel pitch and focal length. On an iPhone it lands near 1 second — conveniently what iOS allows."),
+    GlossaryTerm(term: "Skyglow",
+                 definition: "Artificial light scattered back down by the atmosphere, raising the sky's brightness floor. Anything fainter than the floor never reaches the sensor — which is why stacking can't fix a city sky."),
+    GlossaryTerm(term: "Astronomical darkness",
+                 definition: "When the Sun sits more than 18° below the horizon and stops brightening the sky at all. The window between evening and morning astronomical twilight is prime time for faint targets."),
+    GlossaryTerm(term: "Galactic core",
+                 definition: "The bright, dust-laced center of the Milky Way in Sagittarius — the part people mean by \"Milky Way shot.\" It keeps seasons: northern-hemisphere nights show it roughly March through October."),
+    GlossaryTerm(term: "Terminator",
+                 definition: "The moving line between lunar day and night. Shadows stretch longest there, so craters show maximum relief — it's where every good Moon shot lives."),
+    GlossaryTerm(term: "Radiant",
+                 definition: "The point a meteor shower's streaks trace back to, named for its host constellation. Meteors look longest 30–45° away from it, which is where you aim."),
+    GlossaryTerm(term: "Kappa-sigma",
+                 definition: "The stacker's bouncer: any pixel too many standard deviations from the running mean gets thrown out. It's how planes, satellites and cosmic-ray hits vanish from the final stack."),
+    GlossaryTerm(term: "Read noise",
+                 definition: "The small error a sensor adds every time it reads a frame out. It's the tax stacking pays versus one long exposure — and the reason more, shorter subs aren't entirely free."),
+    GlossaryTerm(term: "Kp index",
+                 definition: "A 0–9 scale of geomagnetic storminess. Kp 5 gives high latitudes an aurora chance; mid-latitudes usually need a rare Kp 8–9 storm. StarFlow doesn't fetch it — check a space-weather app."),
 ]

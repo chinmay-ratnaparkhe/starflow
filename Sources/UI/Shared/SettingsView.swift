@@ -129,8 +129,7 @@ struct SettingsView: View {
                     } label: {
                         Label("Re-run the trigger lesson", systemImage: "hand.tap.fill")
                             .font(Theme.headline)
-                            .frame(maxWidth: .infinity)
-                            .padding(.vertical, 10)
+                            .frame(maxWidth: .infinity, minHeight: 44)
                     }
                     .foregroundStyle(Theme.accent(night))
                     .background(
@@ -138,6 +137,7 @@ struct SettingsView: View {
                             .fill(Theme.accent(night).opacity(0.12))
                             .overlay(Capsule().strokeBorder(Theme.accent(night).opacity(0.4), lineWidth: 1))
                     )
+                    .accessibilityHint("Shows the four-step gimbal setup lesson.")
                 }
             }
         }
@@ -171,6 +171,14 @@ struct SettingsView: View {
                     .foregroundStyle(Theme.secondaryText(night))
             }
         }
+        .accessibilityElement(children: .combine)
+        .accessibilityLabel(connectionAccessibilityLabel(state.text,
+                                                         battery: mount.telemetry?.batteryPercent))
+    }
+
+    private func connectionAccessibilityLabel(_ status: String, battery: Int?) -> String {
+        guard let battery else { return "Gimbal: \(status)" }
+        return "Gimbal: \(status), battery \(battery) percent"
     }
 
     // MARK: - About

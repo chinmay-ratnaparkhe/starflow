@@ -109,6 +109,19 @@ enum TonightFormat {
     static func degrees(_ value: Double) -> String {
         String(format: "%.0f°", value)
     }
+
+    /// "12 minutes 30 seconds" — natural VoiceOver phrasing for durations.
+    static func spokenDuration(_ seconds: Double) -> String {
+        let total = max(0, Int(seconds.rounded()))
+        let h = total / 3600
+        let m = (total % 3600) / 60
+        let s = total % 60
+        var parts: [String] = []
+        if h > 0 { parts.append("\(h) \(h == 1 ? "hour" : "hours")") }
+        if m > 0 { parts.append("\(m) \(m == 1 ? "minute" : "minutes")") }
+        if s > 0 || parts.isEmpty { parts.append("\(s) \(s == 1 ? "second" : "seconds")") }
+        return parts.joined(separator: " ")
+    }
 }
 
 // MARK: - Gimbal status ribbon
@@ -146,6 +159,8 @@ struct GimbalStatusRibbon: View {
                 }
                 Spacer(minLength: 0)
             }
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("Gimbal status: \(s.title). \(s.detail)")
         }
     }
 
@@ -226,12 +241,14 @@ struct LocationPromptCard: View {
                 } label: {
                     Text(denied ? "Open Settings" : "Use my location")
                         .font(Theme.headline)
-                        .frame(maxWidth: .infinity)
-                        .padding(.vertical, 12)
+                        .frame(maxWidth: .infinity, minHeight: 44)
                 }
                 .buttonStyle(.plain)
                 .foregroundStyle(night ? Color.black : Theme.bg)
                 .background(Capsule().fill(Theme.accent(night)))
+                .accessibilityHint(denied
+                                   ? "Opens the Settings app to turn location access back on."
+                                   : "Asks for location permission to compute tonight's sky.")
             }
         }
     }
@@ -317,6 +334,8 @@ struct OutlookStrip: View {
         .frame(minWidth: 58)
         .padding(.horizontal, 10)
         .padding(.vertical, 10)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel(accessibilitySummary(entry))
         .background(
             RoundedRectangle(cornerRadius: 12, style: .continuous)
                 .fill(Theme.cardBg(night))
@@ -329,6 +348,15 @@ struct OutlookStrip: View {
                             lineWidth: 1)
                 )
         )
+    }
+
+    /// "Wednesday: moon 42% illuminated, galactic core visible" — one chip, one sentence.
+    private func accessibilitySummary(_ entry: OutlookNight) -> String {
+        var parts = ["moon \(TonightFormat.percent(entry.moonFraction)) illuminated"]
+        parts.append(entry.coreVisible ? "galactic core visible" : "core stays low")
+        if !entry.hasDarkness { parts.append("no full darkness") }
+        let day = entry.date.formatted(.dateTime.weekday(.wide))
+        return "\(day): \(parts.joined(separator: ", "))"
     }
 }
 

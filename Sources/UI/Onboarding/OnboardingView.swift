@@ -27,16 +27,21 @@ struct OnboardingView: View {
                 HStack {
                     Spacer()
                     if page < lastPage {
-                        Button("Skip") {
+                        Button {
                             withAnimation(.easeInOut) { page = lastPage }
+                        } label: {
+                            Text("Skip")
+                                .font(Theme.caption)
+                                .foregroundStyle(Theme.secondaryText(night))
+                                .frame(minWidth: 44, minHeight: 44)
+                                .contentShape(Rectangle())
                         }
-                        .font(Theme.caption)
-                        .foregroundStyle(Theme.secondaryText(night))
-                        .padding(.trailing, 20)
-                        .padding(.top, 8)
+                        .buttonStyle(.plain)
+                        .padding(.trailing, 12)
+                        .accessibilityHint("Jumps ahead to the sky quality page.")
                     }
                 }
-                .frame(height: 36)
+                .frame(height: 44)
 
                 TabView(selection: $page) {
                     WelcomePage(night: night).tag(0)
@@ -77,6 +82,9 @@ struct OnboardingView: View {
                 .padding(.horizontal, 24)
                 .padding(.top, 12)
                 .padding(.bottom, 18)
+                .accessibilityHint(page < lastPage
+                                   ? "Shows the next page."
+                                   : "Finishes setup and opens the Tonight screen.")
             }
         }
         .sensoryFeedback(.impact(weight: .light), trigger: page)
@@ -91,6 +99,8 @@ struct OnboardingView: View {
             }
         }
         .animation(.spring(duration: 0.35), value: page)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("Page \(page + 1) of \(lastPage + 1)")
     }
 }
 
@@ -371,21 +381,35 @@ private struct PermissionsPage: View {
                         .font(.system(size: 22))
                         .foregroundStyle(Theme.positive(night))
                 case .notAsked:
-                    Button("Allow", action: request)
-                        .font(Theme.headline)
-                        .foregroundStyle(night ? Theme.nightRed : Color.black)
-                        .padding(.horizontal, 16)
-                        .padding(.vertical, 8)
-                        .background(Capsule().fill(night ? Theme.nightRedDim.opacity(0.5) : Theme.gold))
-                case .denied:
-                    Button("Settings") {
-                        if let url = URL(string: "app-settings:") { openURL(url) }
+                    Button(action: request) {
+                        Text("Allow")
+                            .font(Theme.headline)
+                            .foregroundStyle(night ? Theme.nightRed : Color.black)
+                            .padding(.horizontal, 16)
+                            .padding(.vertical, 8)
+                            .background(Capsule().fill(night ? Theme.nightRedDim.opacity(0.5) : Theme.gold))
+                            .frame(minHeight: 44)
+                            .contentShape(Rectangle())
                     }
-                    .font(Theme.headline)
-                    .foregroundStyle(Theme.accent(night))
-                    .padding(.horizontal, 14)
-                    .padding(.vertical, 8)
-                    .background(Capsule().strokeBorder(Theme.accent(night).opacity(0.5), lineWidth: 1))
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Allow \(title.lowercased()) access")
+                    .accessibilityHint("Shows the system permission prompt.")
+                case .denied:
+                    Button {
+                        if let url = URL(string: "app-settings:") { openURL(url) }
+                    } label: {
+                        Text("Settings")
+                            .font(Theme.headline)
+                            .foregroundStyle(Theme.accent(night))
+                            .padding(.horizontal, 14)
+                            .padding(.vertical, 8)
+                            .background(Capsule().strokeBorder(Theme.accent(night).opacity(0.5), lineWidth: 1))
+                            .frame(minHeight: 44)
+                            .contentShape(Rectangle())
+                    }
+                    .buttonStyle(.plain)
+                    .accessibilityLabel("Open Settings")
+                    .accessibilityHint("Opens the Settings app to change \(title.lowercased()) access.")
                 }
             }
         }
@@ -497,6 +521,9 @@ private struct SkyQualityPage: View {
             )
         }
         .buttonStyle(.plain)
+        .accessibilityElement(children: .combine)
+        .accessibilityAddTraits(selected ? .isSelected : [])
+        .accessibilityHint("Sets your sky quality. Feasibility verdicts adapt to it.")
     }
 
     private func blurb(_ quality: SkyQuality) -> String {

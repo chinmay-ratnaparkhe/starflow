@@ -135,6 +135,11 @@ private struct ModeTile: View {
             }
         }
         .buttonStyle(.plain)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("\(item.name). \(item.tagline)")
+        .accessibilityValue(feasibility.map(FeasibilityPresentation.label) ?? "Feasibility unknown")
+        .accessibilityHint("Opens the recipe, tutorial, and start button.")
+        .accessibilityAddTraits(.isButton)
     }
 
     private func dotColor(night: Bool) -> Color {
@@ -200,7 +205,10 @@ private struct ModeDetailSheet: View {
                         Image(systemName: "xmark.circle.fill")
                             .font(.system(size: 22))
                             .foregroundStyle(Theme.secondaryText(night))
+                            .frame(width: 44, height: 44)
+                            .contentShape(Rectangle())
                     }
+                    .accessibilityLabel("Close")
                 }
             }
         }
@@ -347,9 +355,12 @@ private struct ModeDetailSheet: View {
                             Spacer(minLength: 0)
                         }
                         .padding(.vertical, 6)
+                        .frame(minHeight: 44)
                         .contentShape(Rectangle())
                     }
                     .buttonStyle(.plain)
+                    .accessibilityValue(done ? "checked" : "not checked")
+                    .accessibilityHint("Toggles this setup step.")
                     if i < item.checklist.count - 1 {
                         Divider().overlay(Theme.accent(night).opacity(0.10))
                     }
@@ -374,6 +385,8 @@ private struct ModeDetailSheet: View {
         .foregroundStyle(night ? Color.black : Theme.bg)
         .background(Capsule().fill(Theme.accent(night)))
         .padding(.top, 4)
+        .accessibilityLabel("Start \(item.name)")
+        .accessibilityHint("Begins a live session with this recipe.")
     }
 }
 

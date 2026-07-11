@@ -125,5 +125,32 @@ public struct SFStatChip: View {
                 .foregroundStyle(Theme.secondaryText(night))
         }
         .frame(maxWidth: .infinity)
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("\(label), \(spokenValue)")
+    }
+
+    /// Expands compact chip values into natural VoiceOver speech:
+    /// "12m 30s" → "12 minutes 30 seconds", "×300" → "300", "—" → "unavailable".
+    private var spokenValue: String {
+        if value == "—" { return "unavailable" }
+        let cleaned = value.hasPrefix("×") ? String(value.dropFirst()) : value
+        return cleaned.split(separator: " ")
+            .map { Self.spokenToken(String($0)) }
+            .joined(separator: " ")
+    }
+
+    private static func spokenToken(_ token: String) -> String {
+        let units: [(suffix: String, singular: String, plural: String)] = [
+            ("h", "hour", "hours"),
+            ("m", "minute", "minutes"),
+            ("s", "second", "seconds"),
+        ]
+        for unit in units where token.hasSuffix(unit.suffix) {
+            let number = String(token.dropLast(unit.suffix.count))
+            guard !number.isEmpty,
+                  number.allSatisfy({ $0.isNumber || $0 == "/" || $0 == "." }) else { continue }
+            return "\(number) \(number == "1" ? unit.singular : unit.plural)"
+        }
+        return token
     }
 }

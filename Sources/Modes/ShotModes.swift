@@ -61,25 +61,33 @@ public enum ShotModeRegistry {
             + "glowing band with real structure: a strong phone image, not a tracked-DSLR poster. "
             + "Dark skies are non-negotiable; from a city this shot simply does not exist.",
         tutorial: [
-            TutorialStep(id: 1, title: "Find real darkness",
-                body: "Skip this one in the city — no amount of stacking recovers what skyglow buries "
-                    + "before it reaches the sensor. Get to a rural or darker site (Bortle 4 or better) "
-                    + "and give your eyes ten minutes to adapt.",
-                symbol: "map"),
-            TutorialStep(id: 2, title: "Aim at the core",
-                body: "StarFlow points you toward the galactic core, which rides low in the sky — "
-                    + "conveniently inside the gimbal's tilt range. Include a slice of horizon for "
-                    + "scale; a good foreground makes the shot.",
-                symbol: "scope"),
-            TutorialStep(id: 3, title: "Let it stack",
-                body: "The app fires 600 one-second frames and re-frames with a tiny gimbal nudge "
-                    + "about every two minutes to fight the sky's drift. Don't touch the rig — this "
-                    + "is ten minutes of hands-off.",
-                symbol: "square.stack.3d.up"),
-            TutorialStep(id: 4, title: "What you'll get",
-                body: "A luminous band with dust-lane structure emerging from the grain. Moonless "
-                    + "nights roughly double the contrast — check tonight's moon before driving out.",
+            TutorialStep(id: 1, title: "What you're going for",
+                body: "A luminous band with real dust-lane texture rising out of the grain — a "
+                    + "strong phone image, not a tracked-DSLR poster. Ten minutes of stacked "
+                    + "1-second frames builds it, and the darkness of your site decides how deep "
+                    + "it goes.",
                 symbol: "photo"),
+            TutorialStep(id: 2, title: "Set up in real darkness",
+                body: "Get to Bortle 4 or better — skyglow that reaches the sensor can never be "
+                    + "subtracted later. Tripod solid, Free Tilt collar locked, and give your "
+                    + "eyes ten minutes to adapt while the rig settles.",
+                symbol: "map"),
+            TutorialStep(id: 3, title: "Aim low, include the land",
+                body: "StarFlow points you toward the galactic core, which rides low in the sky "
+                    + "— conveniently inside the gimbal's tilt range. Frame a slice of horizon or "
+                    + "a silhouette for scale; the foreground is what sells the shot.",
+                symbol: "scope"),
+            TutorialStep(id: 4, title: "What the app does",
+                body: "It fires 600 one-second subs at ISO 3200, nudging the gimbal about every "
+                    + "two minutes to cancel the sky's quarter-degree-per-minute drift, then "
+                    + "aligns, derotates and averages every frame — rejecting any that a cloud "
+                    + "or plane ruins.",
+                symbol: "wand.and.stars"),
+            TutorialStep(id: 5, title: "Pro tip",
+                body: "Plan around the Moon before you plan around the weather: a moonless core "
+                    + "window roughly doubles contrast. Near new moon, shoot when the core rides "
+                    + "highest — Tonight shows the darkness window that matters.",
+                symbol: "lightbulb"),
         ],
         checklist: ModeChecklists.milkyWay,
         cityViable: false,
@@ -121,24 +129,32 @@ public enum ShotModeRegistry {
             + "through light pollution better than any other night subject. Longer sessions draw "
             + "longer arcs; the gimbal's only job is to hold perfectly still.",
         tutorial: [
-            TutorialStep(id: 1, title: "Any sky works",
-                body: "This is the city-proof shot. Bright stars punch through skyglow, and 30 minutes "
-                    + "of Earth's rotation draws clean arcs even from a balcony over a lit street.",
-                symbol: "building.2"),
+            TutorialStep(id: 1, title: "What you're going for",
+                body: "Clean star arcs about 7.5° long, drawn by 30 minutes of Earth's rotation "
+                    + "and blended brightest-pixel over a sharp foreground. This is the "
+                    + "city-proof shot — bright stars punch through skyglow better than any "
+                    + "other night subject.",
+                symbol: "photo"),
             TutorialStep(id: 2, title: "Compose with an anchor",
-                body: "Put something solid in the frame — rooftop, tree, chimney. Face north toward "
-                    + "Polaris for circular arcs, or east/west for long diagonal streaks.",
+                body: "Put something solid in the frame — rooftop, tree, chimney — so the arcs "
+                    + "have a still point to swing around. Face north toward Polaris for "
+                    + "circles, or east/west for long diagonal streaks.",
                 symbol: "viewfinder"),
-            TutorialStep(id: 3, title: "Gimbal goes to HOLD",
-                body: "The gimbal's only job is to be a rock. Motors hold framing while StarFlow "
-                    + "sends a keep-alive micro-pulse every 15 seconds so the mount never dozes off "
-                    + "mid-sequence.",
+            TutorialStep(id: 3, title: "Capture is 1,800 stills",
+                body: "One-second subs at ISO 400 for 30 minutes, back to back. The gimbal's "
+                    + "only job is to be a rock — one bump prints a kink into every single "
+                    + "trail, so hands off from the first frame to the last.",
                 symbol: "lock.fill"),
-            TutorialStep(id: 4, title: "The long game",
-                body: "1,800 frames take 30 minutes, and the app blends the brightest pixels live so "
-                    + "you can watch the trails grow. 30 minutes ≈ 7.5° of arc — double the time, "
-                    + "double the sweep.",
-                symbol: "clock"),
+            TutorialStep(id: 4, title: "What the app does",
+                body: "It blends the brightest pixel from each frame live, so you can watch the "
+                    + "trails grow, and sends a keep-alive micro-pulse every 15 seconds so the "
+                    + "mount never dozes off mid-sequence.",
+                symbol: "wand.and.stars"),
+            TutorialStep(id: 5, title: "Pro tip",
+                body: "Arc length is pure time: double the session, double the sweep. And this "
+                    + "mode barely cares about the Moon — save moonlit nights for trails and "
+                    + "keep the dark ones for the Milky Way.",
+                symbol: "lightbulb"),
         ],
         checklist: ModeChecklists.starTrails,
         cityViable: true,
@@ -168,24 +184,33 @@ public enum ShotModeRegistry {
             + "short 1/125 s subs at ISO 100 averages out atmospheric shimmer. The Moon is bright "
             + "enough that city skies don't matter at all.",
         tutorial: [
-            TutorialStep(id: 1, title: "Moon checks",
-                body: "You need the Moon above the horizon and at least a crescent lit. The best "
-                    + "detail lives along the terminator — the day/night line — where shadows "
-                    + "stretch long and craters pop.",
-                symbol: "moon.stars"),
-            TutorialStep(id: 2, title: "Zoom with glass, not pixels",
-                body: "Switch to the phone's longest optical lens (5× on your hardware). Digital "
-                    + "zoom just enlarges blur — if you want bigger, crop the stacked result instead.",
-                symbol: "camera.aperture"),
-            TutorialStep(id: 3, title: "Short, fast frames",
-                body: "The lit Moon is daylight-bright: ISO 100 at 1/125 s. StarFlow stacks about "
-                    + "150 of these to average out the atmosphere's shimmer — the same trick "
-                    + "planetary imagers use, scaled to a phone.",
-                symbol: "bolt.fill"),
-            TutorialStep(id: 4, title: "Honest expectations",
-                body: "Expect crisp craters along the terminator at phone-telephoto scale. A low "
-                    + "moon is mushy — atmosphere smears it — so let it climb above about 15° first.",
+            TutorialStep(id: 1, title: "What you're going for",
+                body: "A crisp lunar disk with crater shadows along the terminator — the "
+                    + "day/night line — at the phone's telephoto scale. Think excellent phone "
+                    + "photo, not telescope image; the Moon is bright enough that city skies "
+                    + "don't matter at all.",
                 symbol: "photo"),
+            TutorialStep(id: 2, title: "Set up on the bright side",
+                body: "You need the Moon above the horizon and at least a crescent lit. Let it "
+                    + "climb above about 15° — low moons smear in the thick air near the "
+                    + "horizon — and switch to the phone's longest optical lens (5× on your "
+                    + "hardware).",
+                symbol: "moon.stars"),
+            TutorialStep(id: 3, title: "Capture short and fast",
+                body: "The lit Moon is daylight-bright: ISO 100 at 1/125 s, about 150 frames. "
+                    + "Skip digital zoom — it only enlarges blur. If you want bigger, crop the "
+                    + "stacked result instead.",
+                symbol: "bolt.fill"),
+            TutorialStep(id: 4, title: "What the app does",
+                body: "Nudge tracking follows the Moon's drift while the stack averages out the "
+                    + "atmosphere's shimmer — the same trick planetary imagers call lucky "
+                    + "imaging, scaled to a phone.",
+                symbol: "wand.and.stars"),
+            TutorialStep(id: 5, title: "Pro tip",
+                body: "Shoot near first or last quarter, not full moon. A full moon is lit "
+                    + "face-on — flat and shadowless — while at quarter phase the terminator "
+                    + "shadows stretch long and every crater pops in relief.",
+                symbol: "lightbulb"),
         ],
         checklist: ModeChecklists.lunar,
         cityViable: true,
@@ -219,24 +244,32 @@ public enum ShotModeRegistry {
             + "from a city — but you must know the pass time. Miss it by a minute and you stack "
             + "empty sky.",
         tutorial: [
-            TutorialStep(id: 1, title: "Know the pass",
-                body: "StarFlow can't predict passes yet. Check Spot the Station or Heavens-Above "
-                    + "for tonight's visible pass, and note the start time, direction, and peak "
-                    + "altitude before you set up.",
-                symbol: "clock.badge.exclamationmark"),
-            TutorialStep(id: 2, title: "Frame the path",
-                body: "Aim where the pass begins and leave room across the frame in the direction of "
-                    + "travel. The gimbal's motorized tilt tops out around +27°, so for high passes "
-                    + "frame wide and let the station cross through.",
-                symbol: "scope"),
-            TutorialStep(id: 3, title: "Start two minutes early",
-                body: "Begin capture before the ISS rises. Half-second subs at ISO 800 keep the "
-                    + "streak bright without blowing out the sky — city skies are genuinely fine here.",
-                symbol: "timer"),
-            TutorialStep(id: 4, title: "One bright arc",
-                body: "The frames stack into a single arc crossing the sky. This mode is all about "
-                    + "timing: an empty result almost always means the pass time was off.",
+            TutorialStep(id: 1, title: "What you're going for",
+                body: "One unbroken bright arc crossing your frame, stacked from a 2–6 minute "
+                    + "pass. At magnitude −3 the station outshines every star in the sky, so "
+                    + "this works even from a city — the whole game is timing.",
                 symbol: "photo"),
+            TutorialStep(id: 2, title: "Scout the pass",
+                body: "StarFlow can't predict passes yet. Check Spot the Station or "
+                    + "Heavens-Above for tonight's visible pass, and note three things before "
+                    + "you set up: start time, direction, and peak altitude.",
+                symbol: "clock.badge.exclamationmark"),
+            TutorialStep(id: 3, title: "Frame the path, start early",
+                body: "Aim where the pass begins and leave crossing room in the direction of "
+                    + "travel — the motorized tilt tops out around +27°, so frame wide for high "
+                    + "passes. Begin capture two minutes before the rise time.",
+                symbol: "scope"),
+            TutorialStep(id: 4, title: "What the app does",
+                body: "The mount holds framing dead still while half-second subs at ISO 800 "
+                    + "stack the moving station into one continuous streak — bright without "
+                    + "blowing out the sky. An empty result almost always means the pass time "
+                    + "was off.",
+                symbol: "wand.and.stars"),
+            TutorialStep(id: 5, title: "Pro tip",
+                body: "Prefer passes within a couple of hours of twilight. Later at night the "
+                    + "station flies into Earth's shadow and vanishes mid-sky — if your arc "
+                    + "fades partway across the frame, that's the shadow, not a failure.",
+                symbol: "lightbulb"),
         ],
         checklist: ModeChecklists.issPass,
         cityViable: true,
@@ -261,24 +294,33 @@ public enum ShotModeRegistry {
             + "smooth because every frame is a real long exposure, not a starved snapshot. In v1 the "
             + "gimbal holds framing rock-steady; a slow cinematic pan is on the roadmap.",
         tutorial: [
-            TutorialStep(id: 1, title: "Pick a scene with motion",
-                body: "Clouds, stars, traffic, fog — timelapse rewards change. A static subject "
-                    + "makes a boring clip no matter how pretty the frame is.",
+            TutorialStep(id: 1, title: "What you're going for",
+                body: "240 frames across two hours playing back as a ten-second clip at 24 fps "
+                    + "— stars wheeling, clouds streaming, traffic pulsing. Every frame is a "
+                    + "true 1-second exposure, so night scenes stay bright and smooth instead "
+                    + "of starved and flickery.",
+                symbol: "photo"),
+            TutorialStep(id: 2, title: "Pick a scene with motion",
+                body: "Clouds, stars, fog, traffic — timelapse rewards change. A static subject "
+                    + "makes a boring clip no matter how pretty the frame is, so hunt for "
+                    + "something that will visibly move over two hours.",
                 symbol: "wind"),
-            TutorialStep(id: 2, title: "One frame every 30 seconds",
-                body: "Each frame is a full 1-second exposure, so night scenes stay bright. "
-                    + "240 frames over two hours play back as roughly ten seconds at 24 fps.",
+            TutorialStep(id: 3, title: "One frame every 30 seconds",
+                body: "Each frame is a full 1-second exposure at ISO 800, fired on a 30-second "
+                    + "interval. The long stretch between frames is normal — resist the urge "
+                    + "to check on the rig; a single touch shows as a jolt in the clip.",
                 symbol: "timer"),
-            TutorialStep(id: 3, title: "The gimbal keeps watch",
-                body: "In v1 the gimbal's job is stability: it holds framing and StarFlow sends "
-                    + "keep-alive micro-pulses between frames so the motors never sleep. A slow "
-                    + "cinematic pan is on the roadmap.",
-                symbol: "lock.fill"),
-            TutorialStep(id: 4, title: "Battery math",
-                body: "Two hours of capture is the real constraint. Thermal and battery guardians "
-                    + "will pause or stop the session gracefully — start above 60% charge and "
-                    + "consider a power bank.",
-                symbol: "battery.50"),
+            TutorialStep(id: 4, title: "What the app does",
+                body: "In v1 the gimbal holds framing while keep-alive micro-pulses between "
+                    + "frames stop the motors from sleeping (a slow cinematic pan is on the "
+                    + "roadmap). Thermal and battery guardians pause or end the session "
+                    + "gracefully, saving everything shot so far.",
+                symbol: "wand.and.stars"),
+            TutorialStep(id: 5, title: "Pro tip",
+                body: "Battery is the real constraint: start above 60% or bring a power bank "
+                    + "with a slack cable loop. And frame across the wind, so clouds stream "
+                    + "through the shot instead of crawling toward the lens.",
+                symbol: "lightbulb"),
         ],
         checklist: ModeChecklists.timelapse,
         cityViable: true,
@@ -304,24 +346,32 @@ public enum ShotModeRegistry {
             + "not a sky full of stars. Note: v1 saves both stacks to your library; the final "
             + "day-night blend is still a manual step in your photo editor.",
         tutorial: [
-            TutorialStep(id: 1, title: "Two phases, one shot",
-                body: "Phase one shoots at blue hour while the sky still holds color; phase two "
-                    + "stacks the skyline after the lights come on. The mix of the two is what "
-                    + "makes the image.",
-                symbol: "circle.lefthalf.filled"),
-            TutorialStep(id: 2, title: "Blue hour first",
-                body: "Start 10–20 minutes after sunset. The stacked base exposure banks clean, "
-                    + "noise-free shadow detail you can't recover once the sky goes black.",
+            TutorialStep(id: 1, title: "What you're going for",
+                body: "A two-phase skyline: a blue-hour base while the sky still holds color, "
+                    + "then a clean stack of the lit-up city once the windows glow. Expect "
+                    + "rich, low-noise lights — not a sky full of stars.",
+                symbol: "photo"),
+            TutorialStep(id: 2, title: "Be on station for blue hour",
+                body: "Phase one starts 10–20 minutes after sunset and won't wait for you. "
+                    + "Compose with sky to spare, then don't touch the rig — both phases must "
+                    + "share exactly the same framing for the blend to work.",
                 symbol: "sun.horizon"),
-            TutorialStep(id: 3, title: "Then the lights",
-                body: "Once windows and streetlights dominate, the second stack captures them "
-                    + "clean: 1-second subs at ISO 100 keep bright signs and windows from clipping.",
-                symbol: "building.2"),
-            TutorialStep(id: 4, title: "Blend honestly",
-                body: "v1 saves both stacks; blending them into one image is a manual step in your "
-                    + "editor (auto-blend is on the roadmap). Any rock-steady support works — the "
-                    + "gimbal is simply a convenient tripod here.",
-                symbol: "slider.horizontal.3"),
+            TutorialStep(id: 3, title: "Capture in two acts",
+                body: "The blue-hour stack banks clean, noise-free shadow detail you can't "
+                    + "recover once the sky goes black. When windows and streetlights take "
+                    + "over, the second stack shoots 1-second subs at ISO 100 so bright signs "
+                    + "don't clip.",
+                symbol: "circle.lefthalf.filled"),
+            TutorialStep(id: 4, title: "What the app does",
+                body: "It aligns and averages each phase into its own low-noise stack and "
+                    + "saves both to your library. v1 stops there: the final day-night blend "
+                    + "is a manual step in your editor (auto-blend is on the roadmap).",
+                symbol: "wand.and.stars"),
+            TutorialStep(id: 5, title: "Pro tip",
+                body: "Blend like the pros: blue-hour frame for sky and shadows, night stack "
+                    + "for the lights, one soft mask between them. Any rock-steady support "
+                    + "works — the gimbal is simply a convenient tripod here.",
+                symbol: "lightbulb"),
         ],
         checklist: ModeChecklists.cityscape,
         cityViable: true,
@@ -348,25 +398,31 @@ public enum ShotModeRegistry {
             + "record gray-green airglow and nothing more — this mode is gated on the geomagnetic "
             + "forecast, which StarFlow does not fetch. Check a space-weather app first.",
         tutorial: [
-            TutorialStep(id: 1, title: "Check the forecast first",
+            TutorialStep(id: 1, title: "What you're going for",
+                body: "If the sky fires: curtains with color your eyes barely register, plus "
+                    + "the whole sequence as a timelapse for free. If Kp stays low you'll "
+                    + "record gray-green airglow and nothing more — that's the honest deal.",
+                symbol: "photo"),
+            TutorialStep(id: 2, title: "Check the forecast first",
                 body: "Aurora is Kp-gated and StarFlow doesn't fetch space weather. Check a "
-                    + "forecast app: Kp 5+ gives high latitudes a real chance; mid-latitudes need "
-                    + "a severe Kp 8–9 storm.",
+                    + "forecast app: Kp 5+ gives high latitudes a real chance; mid-latitudes "
+                    + "need a severe Kp 8–9 storm.",
                 symbol: "chart.line.uptrend.xyaxis"),
-            TutorialStep(id: 2, title: "Face the pole, find dark",
-                body: "Aurora hugs the poleward horizon — north in the northern hemisphere. Get "
-                    + "away from city glow in that direction; even a strong display loses to a "
-                    + "streetlight in the frame.",
+            TutorialStep(id: 3, title: "Face the pole, find dark",
+                body: "Aurora hugs the poleward horizon — north in the northern hemisphere. "
+                    + "Get the darkest view you can in that direction; a single streetlight in "
+                    + "frame beats even a strong display.",
                 symbol: "location.north.line"),
-            TutorialStep(id: 3, title: "One-second frames, no tracking",
-                body: "Aurora moves fast, so the mount just holds framing while 1-second subs at "
-                    + "ISO 1600 record the curtains without smearing their structure.",
-                symbol: "camera"),
-            TutorialStep(id: 4, title: "Stills and motion",
-                body: "You get both: individual frames catch curtain structure, and the sequence "
-                    + "plays back as a timelapse. If Kp stays low you'll capture faint airglow at "
-                    + "best — that's the honest deal.",
-                symbol: "film"),
+            TutorialStep(id: 4, title: "What the app does",
+                body: "One-second subs at ISO 1600 on a two-second cadence, no tracking — the "
+                    + "mount just holds framing so fast-moving curtains keep their structure "
+                    + "instead of smearing. Stills and motion from one session.",
+                symbol: "wand.and.stars"),
+            TutorialStep(id: 5, title: "Pro tip",
+                body: "The camera sees color before you do. A faint gray band on the poleward "
+                    + "horizon that reads as odd cloud is often aurora — shoot it and check "
+                    + "the frame for green before you pack up.",
+                symbol: "lightbulb"),
         ],
         checklist: ModeChecklists.aurora,
         cityViable: false,
@@ -403,24 +459,32 @@ public enum ShotModeRegistry {
             + "Most frames will be empty sky — that's normal and expected. Dark skies are required; "
             + "city glow erases all but rare fireballs.",
         tutorial: [
-            TutorialStep(id: 1, title: "Dark skies or don't bother",
-                body: "Meteors are faint, fast, one-frame events. City glow erases all but rare "
-                    + "fireballs — this mode needs rural darkness, ideally on a shower's peak night.",
-                symbol: "map"),
-            TutorialStep(id: 2, title: "Frame off the radiant",
-                body: "Meteors radiate from the shower's namesake constellation but look longest "
-                    + "30–45° away from it. The motorized tilt tops out around +27°, so for higher "
-                    + "fields tilt the phone in its clamp before you start.",
-                symbol: "scope"),
-            TutorialStep(id: 3, title: "Volume is the strategy",
-                body: "1,200 one-second frames at ISO 3200. Any frame that catches a meteor "
-                    + "freezes it sharp; watch the live preview for streaks as they land.",
-                symbol: "square.stack.3d.up"),
-            TutorialStep(id: 4, title: "Real catch rates",
-                body: "A strong shower at a dark site yields a few meteors per 20 minutes of "
-                    + "capture. Empty frames are the norm, not a failure — patience is the whole "
-                    + "game.",
+            TutorialStep(id: 1, title: "What you're going for",
+                body: "A patience game with sharp rewards: during a good shower's peak, 20 "
+                    + "minutes of frames might catch 2–3 meteors, each frozen crisp in a "
+                    + "single 1-second sub. Most frames will be empty sky — normal, not a "
+                    + "failure.",
                 symbol: "photo"),
+            TutorialStep(id: 2, title: "Dark skies on the peak night",
+                body: "Meteors are faint, fast, one-frame events; city glow erases all but "
+                    + "rare fireballs. Get to rural darkness on the shower's actual peak "
+                    + "night — rates fall off hard just a night or two either side.",
+                symbol: "map"),
+            TutorialStep(id: 3, title: "Frame off the radiant",
+                body: "Streaks trace back to the shower's namesake constellation but look "
+                    + "longest 30–45° away from it, so aim there. The motorized tilt tops out "
+                    + "around +27° — for higher fields, tilt the phone in its clamp first.",
+                symbol: "scope"),
+            TutorialStep(id: 4, title: "What the app does",
+                body: "It fires 1,200 one-second frames at ISO 3200 with no tracking, keeping "
+                    + "every sub so a meteor is never averaged away. Watch the live preview "
+                    + "for streaks as they land.",
+                symbol: "wand.and.stars"),
+            TutorialStep(id: 5, title: "Pro tip",
+                body: "Stay up late: after midnight your side of Earth turns to face the "
+                    + "meteor stream head-on, and hourly counts often double what the evening "
+                    + "gave you. Bring a chair and a warm layer.",
+                symbol: "lightbulb"),
         ],
         checklist: ModeChecklists.meteors,
         cityViable: false,
@@ -458,24 +522,31 @@ public enum ShotModeRegistry {
             + "city skyglow, so a west-facing balcony often works. The catch is timing: close "
             + "pairs usually hang low near the Sun, so your window is the hour around twilight.",
         tutorial: [
-            TutorialStep(id: 1, title: "The twilight window",
-                body: "Close planet pairs usually sit low near the Sun, so your window is civil to "
-                    + "nautical twilight — roughly 20–60 minutes after sunset. Check which pair is "
-                    + "up this month before heading out.",
-                symbol: "sun.horizon"),
-            TutorialStep(id: 2, title: "City-friendly targets",
-                body: "Planets are far brighter than stars — Venus and Jupiter cut through any "
-                    + "skyglow. A clear view toward the pair's horizon matters more than darkness.",
-                symbol: "building.2"),
-            TutorialStep(id: 3, title: "Short subs, clean points",
-                body: "Half-second subs at ISO 400 keep bright planets from blooming while the "
-                    + "twilight gradient survives in the stack. Gentle nudge tracking holds the "
-                    + "pair in frame as they sink.",
-                symbol: "camera.aperture"),
-            TutorialStep(id: 4, title: "What you'll see",
-                body: "Two crisp points over twilight color — simple, reliable, and shareable. "
-                    + "This is a great first StarFlow shot: short session, forgiving conditions.",
+            TutorialStep(id: 1, title: "What you're going for",
+                body: "Two crisp planet points over graded twilight color — Venus may show a "
+                    + "hint of a disk at tele zoom; the rest stay perfect dots. Short session, "
+                    + "forgiving conditions: a great first StarFlow shot.",
                 symbol: "photo"),
+            TutorialStep(id: 2, title: "Time the twilight window",
+                body: "Close planet pairs usually sit low near the Sun, so your window is "
+                    + "civil to nautical twilight — roughly 20–60 minutes after sunset. Check "
+                    + "which pair is up this month before heading out.",
+                symbol: "sun.horizon"),
+            TutorialStep(id: 3, title: "Claim the pair's horizon",
+                body: "Planets are far brighter than stars — Venus and Jupiter cut through any "
+                    + "skyglow, so a west-facing balcony often works. A clear view toward the "
+                    + "pair's horizon matters more than darkness.",
+                symbol: "building.2"),
+            TutorialStep(id: 4, title: "What the app does",
+                body: "Half-second subs at ISO 400 keep bright planets from blooming while the "
+                    + "twilight gradient survives in the stack, and gentle nudge tracking "
+                    + "holds the sinking pair in frame.",
+                symbol: "wand.and.stars"),
+            TutorialStep(id: 5, title: "Pro tip",
+                body: "Shoot through the whole window rather than one burst — the sky "
+                    + "gradient changes minute by minute, and the keeper often lands deep in "
+                    + "nautical twilight when the pair blazes against the last color.",
+                symbol: "lightbulb"),
         ],
         checklist: ModeChecklists.conjunction,
         cityViable: true,
