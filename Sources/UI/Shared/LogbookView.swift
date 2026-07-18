@@ -215,10 +215,20 @@ private struct LogbookDetailSheet: View {
     let thumbnail: CGImage?
     let onDelete: () -> Void
 
+    @State private var showTimelapsePlayer = false
+
     init(record: SessionRecord, thumbnail: CGImage?, onDelete: @escaping () -> Void) {
         self.record = record
         self.thumbnail = thumbnail
         self.onDelete = onDelete
+    }
+
+    /// The record's timelapse clip, only when the file is actually still on
+    /// disk — the honest gate before offering Play/Share buttons.
+    private var timelapseURL: URL? {
+        guard let filename = record.timelapseFilename,
+              TimelapseLibrary.videoExists(filename: filename) else { return nil }
+        return TimelapseLibrary.url(forFilename: filename)
     }
 
     var body: some View {
@@ -230,6 +240,7 @@ private struct LogbookDetailSheet: View {
                     VStack(alignment: .leading, spacing: 16) {
                         heroCard(night: night)
                         stackCard(night: night)
+                        timelapseCard(night: night)
                         statsCard(night: night)
                         deleteButton(night: night)
                     }
@@ -287,10 +298,9 @@ private struct LogbookDetailSheet: View {
             VStack(alignment: .leading, spacing: 12) {
                 SFSectionLabel("The stack")
                 if let thumbnail {
-                    let image = Image(decorative: thumbnail, scale: 1)
                     // scaledToFit: show the stack's true aspect/orientation —
                     // exactly what the share button hands out.
-                    image
+                    Image(decorative: thumbnail, scale: 1)
                         .resizable()
                         .scaledToFit()
                         .frame(height: 220)
@@ -298,6 +308,13 @@ private struct LogbookDetailSheet: View {
                         .background(Color.black)
                         .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
                         .colorMultiply(night ? Theme.nightRed : .white)
+                    #if canImport(UIKit)
+                    // Share card first (feature 9), raw image second — the
+                    // card renders only what this record holds.
+                    ShareCardSection(record: record, image: thumbnail, night: night,
+                                     rawShareMessage: shareSummary)
+                    #else
+                    let image = Image(decorative: thumbnail, scale: 1)
                     ShareLink(item: image,
                               message: Text(shareSummary),
                               preview: SharePreview("StarFlow — \(record.shotName)", image: image)) {
@@ -305,6 +322,7 @@ private struct LogbookDetailSheet: View {
                     }
                     .foregroundStyle(night ? Theme.nightRed : Color.black)
                     .background(Capsule().fill(night ? Theme.nightRedDim.opacity(0.4) : Theme.gold))
+                    #endif
                 } else {
                     Text("No preview was saved with this session — the stats below are the whole story.")
                         .font(Theme.body)
@@ -316,6 +334,54 @@ private struct LogbookDetailSheet: View {
                     .foregroundStyle(Theme.accent(night))
                     .background(Capsule().strokeBorder(Theme.accent(night).opacity(0.5), lineWidth: 1))
                 }
+            }
+        }
+    }
+
+    // MARK: Timelapse clip (feature 8)
+
+    /// Play + share for the session's assembled .mp4. Shown only while the
+    /// clip file exists; a record whose file has gone missing gets an honest
+    /// one-liner instead of dead buttons.
+    @ViewBuilder
+    private func timelapseCard(night: Bool) -> some View {
+        if let url = timelapseURL {
+            SFCard {
+                VStack(alignment: .leading, spacing: 12) {
+                    SFSectionLabel("The timelapse")
+                    Button {
+                        showTimelapsePlayer = true
+                    } label: {
+                        Label("Play the clip", systemImage: "play.circle.fill")
+                            .font(Theme.headline)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 12)
+                    }
+                    .buttonStyle(.plain)
+                    .foregroundStyle(Theme.accent(night))
+                    .background(Capsule().strokeBorder(Theme.accent(night).opacity(0.5),
+                                                       lineWidth: 1))
+                    .accessibilityHint("Plays this session's timelapse video.")
+                    ShareLink(item: url) {
+                        Label("Share the video", systemImage: "square.and.arrow.up")
+                            .font(Theme.headline)
+                            .frame(maxWidth: .infinity)
+                            .padding(.vertical, 12)
+                    }
+                    .foregroundStyle(night ? Theme.nightRed : Color.black)
+                    .background(Capsule().fill(night ? Theme.nightRedDim.opacity(0.4) : Theme.gold))
+                }
+            }
+            .sheet(isPresented: $showTimelapsePlayer) {
+                VideoPlayerSheet(url: url, title: record.shotName)
+            }
+        } else if record.timelapseFilename != nil {
+            SFCard {
+                Text("This session made a timelapse clip, but its file is no longer "
+                     + "on this phone.")
+                    .font(Theme.caption)
+                    .foregroundStyle(Theme.secondaryText(night))
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
     }

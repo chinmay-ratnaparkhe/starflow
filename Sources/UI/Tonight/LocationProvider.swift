@@ -12,6 +12,18 @@ public final class AppLocation {
     private init() {}
 }
 
+/// Best-effort reverse geocoding for the logbook: turns a `GeoLocation` into a
+/// city name ("Cupertino") for the share card's optional location line.
+/// Returns nil on any failure (offline, no placemark) — callers store nothing
+/// rather than a guess, and the card simply omits the location.
+public enum CityResolver {
+    public static func city(for location: GeoLocation) async -> String? {
+        let point = CLLocation(latitude: location.latitude, longitude: location.longitude)
+        let placemarks = try? await CLGeocoder().reverseGeocodeLocation(point)
+        return placemarks?.first?.locality
+    }
+}
+
 /// When-in-use location for sky computation. Publishes the freshest `GeoLocation`,
 /// persists the last known fix so the Tonight screen works instantly on relaunch,
 /// and surfaces a `denied` flag so the UI can show a friendly settings prompt.

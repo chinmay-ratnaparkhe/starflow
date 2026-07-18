@@ -160,6 +160,10 @@ private struct ModeDetailSheet: View {
     let feasibility: Feasibility?
     @State private var sessionShot: ShotModeItem?
     @State private var checkedSteps: Set<Int> = []
+    /// 24/30 fps choice for the timelapse clip (feature 8) — read by the
+    /// session engine at assembly time via `TimelapseFramePolicy.userFPS()`.
+    @AppStorage(TimelapseFramePolicy.fpsDefaultsKey)
+    private var timelapseFPS: Int = TimelapseFramePolicy.defaultFPS
 
     init(item: ShotModeItem, feasibility: Feasibility?) {
         self.item = item
@@ -184,6 +188,10 @@ private struct ModeDetailSheet: View {
                         SFSectionLabel("Recipe")
                         recipeCard(item.recipe)
                         requirementTags(night: night)
+                        if item.producesTimelapse {
+                            SFSectionLabel("Timelapse clip")
+                            timelapseExportCard(night: night)
+                        }
                         SFSectionLabel("How it works")
                         tutorialCard(steps: item.tutorial, night: night)
                         if !item.checklist.isEmpty {
@@ -277,6 +285,33 @@ private struct ModeDetailSheet: View {
                                    : "None",
                                label: "Interval")
                 }
+            }
+        }
+    }
+
+    /// Feature 8: the 24/30 fps choice for the assembled .mp4, with an honest
+    /// preview of the clip length this mode's plan produces at that rate.
+    private func timelapseExportCard(night: Bool) -> some View {
+        let frames = TimelapseFramePolicy.retainedFrameCount(
+            planned: item.recipe.targetSubCount)
+        let fps = TimelapseFramePolicy.sanitizedFPS(timelapseFPS)
+        let seconds = Int(TimelapseFramePolicy.clipSeconds(frames: frames, fps: fps).rounded())
+        return SFCard {
+            VStack(alignment: .leading, spacing: 12) {
+                Picker("Playback speed", selection: $timelapseFPS) {
+                    Text("24 fps").tag(24)
+                    Text("30 fps").tag(30)
+                }
+                .pickerStyle(.segmented)
+                .accessibilityLabel("Timelapse playback speed")
+                Text("Every captured frame is kept for the clip — downscaled to "
+                     + "1080p-class, capped at \(TimelapseFramePolicy.maxFrames) frames. "
+                     + "This plan's \(frames) frames play back as about \(seconds) seconds "
+                     + "at \(fps) fps; the .mp4 is assembled on-device when the session "
+                     + "develops.")
+                    .font(Theme.caption)
+                    .foregroundStyle(Theme.secondaryText(night))
+                    .fixedSize(horizontal: false, vertical: true)
             }
         }
     }

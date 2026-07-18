@@ -18,6 +18,9 @@ struct SessionView: View {
     @State private var showEndDialog = false
     @State private var abortOnExit = false
     @State private var loggedSession = false
+    /// The record `logSessionIfNeeded` filed — the landing report's share card
+    /// renders from THIS, so the card and the logbook can never disagree.
+    @State private var loggedRecord: SessionRecord?
     @State private var showGimbalSchool = false
     @StateObject private var framing = FramingGuidanceModel()
 
@@ -53,6 +56,17 @@ struct SessionView: View {
                     logSessionIfNeeded()
                 }
             }
+        }
+        .onChange(of: engine.timelapseVideoURL) { _, newURL in
+            // The user-stop path assembles the clip AFTER the record was filed
+            // (assembly must never block the stop button) — link the finished
+            // clip back into the logbook record when it lands.
+            guard let newURL, var record = loggedRecord,
+                  record.timelapseFilename == nil else { return }
+            record.timelapseFilename = newURL.lastPathComponent
+            // save() keeps the existing thumbnail when none is passed.
+            SessionStore.shared.save(record)
+            loggedRecord = record
         }
         .onChange(of: engine.phase) { oldPhase, newPhase in
             guard oldPhase != newPhase else { return }
@@ -106,6 +120,8 @@ struct SessionView: View {
                     }
                     LandingReport(shot: shot, stats: stats, preview: engine.latestPreview,
                                   simulated: engine.captureSourceIsSimulated,
+                                  record: loggedRecord,
+                                  timelapseURL: engine.timelapseVideoURL,
                                   night: night, onNewSession: { dismiss() })
                         .transition(.asymmetric(
                             insertion: .scale(scale: 0.94).combined(with: .opacity),
@@ -175,10 +191,45 @@ struct SessionView: View {
             // nothing rather than a hollow verdict.
             skyCondition: stats.skyCondition == .unknown ? nil : stats.skyCondition,
             subsSkippedClouds: stats.subsSkippedClouds,
-            subsLostToClouds: stats.subsLostToClouds)
+            subsLostToClouds: stats.subsLostToClouds,
+            // 0 = calibration never ran/declined — store nothing, so the share
+            // card's "calibrated against N stars" line can never be hollow.
+            calibrationStars: stats.calibrationStars > 0 ? stats.calibrationStars : nil,
+            // Simulated capture is remembered so the share card stays honest
+            // even when shared from the logbook weeks later.
+            simulatedCapture: engine.captureSourceIsSimulated ? true : nil,
+            // Timelapse clip (feature 8): on the normal path assembly finishes
+            // before .complete, so the filename lands here; the user-stop path
+            // links it via the onChange above once assembly catches up.
+            timelapseFilename: engine.timelapseVideoURL?.lastPathComponent)
         // latestPreview is already rotated upright by the engine's develop phase,
         // so the logbook thumbnail and share sheet inherit the correct orientation.
         SessionStore.shared.save(record, thumbnail: engine.latestPreview)
+        loggedRecord = record
+        resolveCityIfPossible(for: record)
+    }
+
+    /// Best-effort: reverse-geocode the session's location fix into a city
+    /// name and re-save the record with it (share card's optional location
+    /// line). Requires a real fix; failure stores nothing — never a guess.
+    private func resolveCityIfPossible(for record: SessionRecord) {
+        guard let location = AppLocation.shared.current else { return }
+        Task { @MainActor in
+            guard let city = await CityResolver.city(for: location), !city.isEmpty
+            else { return }
+            // Base the update on the FRESHEST copy of the record, not the one
+            // captured before geocoding: on the user-stop path the timelapse
+            // onChange above may have linked the clip's filename while the
+            // geocoder was in flight, and re-saving the stale capture would
+            // silently clobber that link (orphaning the clip forever — the URL
+            // never publishes twice). Both closures run on the MainActor, so
+            // whichever lands second sees the other's write.
+            var updated = (loggedRecord?.id == record.id ? loggedRecord : nil) ?? record
+            updated.locationCity = city
+            // save() keeps the existing thumbnail when none is passed.
+            SessionStore.shared.save(updated)
+            if loggedRecord?.id == record.id { loggedRecord = updated }
+        }
     }
 
     // MARK: - Aim Assist status card
@@ -928,8 +979,15 @@ private struct LandingReport: View {
     let stats: SessionStats
     let preview: CGImage?
     let simulated: Bool
+    /// The logbook record this session filed — share cards render from it
+    /// (and only it), so the card can never claim more than the logbook holds.
+    let record: SessionRecord?
+    /// The assembled timelapse clip (feature 8), when this session made one.
+    let timelapseURL: URL?
     let night: Bool
     let onNewSession: () -> Void
+
+    @State private var showTimelapsePlayer = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
@@ -1003,15 +1061,18 @@ private struct LandingReport: View {
                             .overlay(alignment: .topTrailing) {
                                 if simulated { SimulatedBadge().padding(8) }
                             }
-                        ShareLink(item: image,
-                                  preview: SharePreview("StarFlow — \(shot.name)", image: image)) {
-                            Label("Share the stack", systemImage: "square.and.arrow.up")
-                                .font(Theme.headline)
-                                .frame(maxWidth: .infinity)
-                                .padding(.vertical, 12)
+                        #if canImport(UIKit)
+                        if let record {
+                            // Share card first (feature 9), raw image second —
+                            // both inside the section. Renders from the SAME
+                            // record the logbook just filed.
+                            ShareCardSection(record: record, image: preview, night: night)
+                        } else {
+                            rawOnlyShareLink(image: image, night: night)
                         }
-                        .foregroundStyle(night ? Theme.nightRed : Color.black)
-                        .background(Capsule().fill(night ? Theme.nightRedDim.opacity(0.4) : Theme.gold))
+                        #else
+                        rawOnlyShareLink(image: image, night: night)
+                        #endif
                     }
                 }
             } else {
@@ -1019,6 +1080,28 @@ private struct LandingReport: View {
                     Text("No preview image was produced this run — subs are saved, so nothing is lost.")
                         .font(Theme.body)
                         .foregroundStyle(Theme.secondaryText(night))
+                }
+            }
+
+            if let timelapseURL {
+                timelapseCard(url: timelapseURL)
+            } else if shot.producesTimelapse {
+                // Honest placeholder: the user-stop path assembles the clip
+                // AFTER landing (the card appears when the URL publishes), a
+                // session can end before any frame was retained, and a failed
+                // assembly is narrated by the engine — no fake spinner here.
+                SFCard {
+                    HStack(alignment: .top, spacing: 10) {
+                        Image(systemName: "film")
+                            .font(.system(size: 16, weight: .medium))
+                            .foregroundStyle(Theme.accent(night))
+                        Text("No video yet. If frames were kept for the clip, assembly "
+                             + "runs right after the session ends and the video appears "
+                             + "here — and in the Logbook — when it's done.")
+                            .font(Theme.caption)
+                            .foregroundStyle(Theme.secondaryText(night))
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
                 }
             }
 
@@ -1032,6 +1115,63 @@ private struct LandingReport: View {
             .background(Capsule().strokeBorder(Theme.accent(night).opacity(0.5), lineWidth: 1))
             .accessibilityHint("Closes this report and returns to the shot list.")
         }
+        .sheet(isPresented: $showTimelapsePlayer) {
+            if let timelapseURL {
+                VideoPlayerSheet(url: timelapseURL, title: shot.name)
+            }
+        }
+    }
+
+    /// The timelapse deliverable: play it right here, share the .mp4 anywhere.
+    private func timelapseCard(url: URL) -> some View {
+        SFCard {
+            VStack(alignment: .leading, spacing: 12) {
+                HStack {
+                    SFSectionLabel("Your timelapse")
+                    Spacer()
+                    if simulated { SimulatedBadge() }
+                }
+                Button {
+                    showTimelapsePlayer = true
+                } label: {
+                    Label("Play the clip", systemImage: "play.circle.fill")
+                        .font(Theme.headline)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 12)
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(Theme.accent(night))
+                .background(Capsule().strokeBorder(Theme.accent(night).opacity(0.5), lineWidth: 1))
+                .accessibilityHint("Plays the assembled timelapse video.")
+                ShareLink(item: url) {
+                    Label("Share the video", systemImage: "square.and.arrow.up")
+                        .font(Theme.headline)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 12)
+                }
+                .foregroundStyle(night ? Theme.nightRed : Color.black)
+                .background(Capsule().fill(night ? Theme.nightRedDim.opacity(0.4) : Theme.gold))
+                Text("Saved as an .mp4 in StarFlow's documents — it stays on this phone "
+                     + "until you share it, and lives in the Logbook with this session.")
+                    .font(Theme.caption)
+                    .foregroundStyle(Theme.secondaryText(night))
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
+    /// Fallback share (raw stack only) for the pathological case where the
+    /// report shows before the logbook record landed.
+    private func rawOnlyShareLink(image: Image, night: Bool) -> some View {
+        ShareLink(item: image,
+                  preview: SharePreview("StarFlow — \(shot.name)", image: image)) {
+            Label("Share the stack", systemImage: "square.and.arrow.up")
+                .font(Theme.headline)
+                .frame(maxWidth: .infinity)
+                .padding(.vertical, 12)
+        }
+        .foregroundStyle(night ? Theme.nightRed : Color.black)
+        .background(Capsule().fill(night ? Theme.nightRedDim.opacity(0.4) : Theme.gold))
     }
 }
 

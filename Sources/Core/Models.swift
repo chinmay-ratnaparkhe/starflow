@@ -308,5 +308,10 @@ public struct SessionStats: Sendable {
     /// (feature 5 GoTo). Appended field with a default so the empty init keeps
     /// its meaning.
     public var driftCorrections: Int = 0
+    /// Catalog stars the star-colour calibration (feature 6, SPCC-lite)
+    /// actually fitted against — 0 when calibration never ran or declined.
+    /// Set ONLY from a real `ColorCalibrator` result; never invented.
+    /// Appended field with a default so the empty init keeps its meaning.
+    public var calibrationStars: Int = 0
     public init() {}
 }

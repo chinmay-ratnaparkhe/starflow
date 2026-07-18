@@ -350,6 +350,11 @@ public final class SessionEngine: ObservableObject {
     @Published public private(set) var focusSharpness: Double?
     @Published public private(set) var focusSharpnessMean: Double?
     @Published public private(set) var focusDrifting = false
+    /// Assembled timelapse clip for this session (feature 8) — set after the
+    /// Develop phase encodes the retained frames into an .mp4 in
+    /// `Documents/Timelapses/`. Nil for non-timelapse modes, when nothing was
+    /// retained, or when assembly failed (the failure is narrated, never fatal).
+    @Published public private(set) var timelapseVideoURL: URL?
 
     // MARK: Published telemetry mirrors
 
@@ -481,6 +486,13 @@ public final class SessionEngine: ObservableObject {
     /// Accepted stacked frames before the accumulators are measured — a
     /// near-empty mean would make the aperture photometry noise-dominated.
     static let colorCalMinFrames = 5
+    /// Timelapse frame retention (feature 8): per-sub frames land here as
+    /// bounded, downscaled JPEGs when the shot produces a timelapse. Nil for
+    /// every other mode. Consumed (and nilled) by the Develop-phase assembly.
+    private var timelapseStore: TimelapseFrameStore?
+    /// One-shot narration flags so the cap / storage-stop lines post once.
+    private var timelapseCapNarrated = false
+    private var timelapseRetentionStopped = false
     /// Drift cross-check cadence: every 10 min, or after 5 framing nudges,
     /// whichever comes first.
     static let driftCheckInterval: TimeInterval = 600
@@ -528,6 +540,11 @@ public final class SessionEngine: ObservableObject {
         nudgesAtLastDriftCheck = 0
         colorCalSolve = nil
         colorCalEvaluated = false
+        timelapseStore?.clear()
+        timelapseStore = shot.producesTimelapse ? TimelapseFrameStore() : nil
+        timelapseVideoURL = nil
+        timelapseCapNarrated = false
+        timelapseRetentionStopped = false
         netYawDeg = 0
         thermalBackoffSeconds = 0
         lastNudgeAt = nil
@@ -569,7 +586,17 @@ public final class SessionEngine: ObservableObject {
             if let final = stacker.finalImage() { latestPreview = oriented(final) }
             phase = .complete
             statusDetail = "Session ended early — \(stats.subsAccepted) frames kept."
+            // A user-stopped timelapse still deserves its clip: assemble the
+            // retained frames asynchronously (abort itself must stay instant).
+            // The landing report's video card appears when the URL publishes.
+            if let store = timelapseStore, store.count > 0 {
+                timelapseStore = nil
+                Task { [weak self] in await self?.assembleTimelapse(from: store) }
+            } else {
+                discardTimelapseFrames()
+            }
         } else {
+            discardTimelapseFrames()
             phase = .connect
             activeShot = nil
             statusDetail = "Ready"
@@ -779,8 +806,13 @@ public final class SessionEngine: ObservableObject {
         // Storage pre-flight: refuse a plan the disk can't hold BEFORE the first frame
         // (StorageBudget owns the math; hooks.estimatedBytesPerFrame is the seam).
         // The in-flight guardian below still watches the 1 GB floor during capture.
-        let plannedBytes = StorageBudget.plannedSessionBytes(
+        var plannedBytes = StorageBudget.plannedSessionBytes(
             recipe: recipe, bytesPerFrame: hooks.estimatedBytesPerFrame(recipe))
+        if timelapseStore != nil {
+            // Timelapse retention writes bounded 1080p-class JPEGs plus the
+            // assembled clip — count them in the plan the disk must hold.
+            plannedBytes += TimelapseFramePolicy.plannedBytes(frameCount: recipe.targetSubCount)
+        }
         switch StorageBudget.verdict(freeBytes: hooks.freeDiskBytes(), plannedBytes: plannedBytes) {
         case .refuse:
             interruption = .storageLow
@@ -875,6 +907,11 @@ public final class SessionEngine: ObservableObject {
             let frame = try await hooks.captureSub(recipe, attempt)
             attempt += 1
             syncFocusTelemetry()
+            // Timelapse frame retention (feature 8): every captured frame joins
+            // the clip (clouds included — they ARE the shot), bounded by the
+            // policy's cap and storage floor. Narrations hold for one frame via
+            // the status chain below.
+            let timelapseNarrated = retainTimelapseFrameIfNeeded(frame)
             // Cloud gate (defaulted engine setting): while the measured sky is
             // cloudy in a registered-stack session, keep capturing but skip the
             // accumulate — registration would only reject these frames. The
@@ -960,7 +997,7 @@ public final class SessionEngine: ObservableObject {
                     frameSeconds: recipe.exposureSeconds + recipe.intervalSeconds,
                     extending: cloudExtensionActive)
             } else if (cloudGateActive && skyCondition == .cloudy) || skyAdvicePosted
-                        || refineNarrated || colorCalNarrated {
+                        || refineNarrated || colorCalNarrated || timelapseNarrated {
                 // Hold the sky advice on screen for at least one frame instead
                 // of overwriting it with the sub counter immediately.
             } else if rejectionStreak < 8 {
@@ -1264,6 +1301,9 @@ public final class SessionEngine: ObservableObject {
                                                     width: dims.width, height: dims.height)
         else { return false }
         cpu.applyChannelGains(r: gains.rGain, b: gains.bGain)
+        // Remembered in stats so the logbook record (and its share card) can
+        // state "calibrated against N stars" from the real fit, never a guess.
+        stats.calibrationStars = gains.starCount
         statusDetail = "Star colors calibrated against \(gains.starCount) catalog stars."
         return true
     }
@@ -1388,6 +1428,100 @@ public final class SessionEngine: ObservableObject {
             latestPreview = oriented(final)
         } else if let preview = stacker.currentResult().preview {
             latestPreview = oriented(preview)
+        }
+        // Timelapse assembly (feature 8): encode the retained frames into the
+        // .mp4 AFTER the camera is torn down (no encode/capture contention) and
+        // BEFORE the phase flips to .complete, so the landing report and the
+        // logbook record both see the finished clip.
+        await assembleTimelapseIfNeeded()
+    }
+
+    // MARK: Timelapse retention + assembly (feature 8)
+
+    /// Retain one captured frame for the timelapse clip (downscaled JPEG on
+    /// disk, see `TimelapseFrameStore`). Bounded by `TimelapseFramePolicy`:
+    /// the frame cap and the storage floor each stop retention gracefully —
+    /// capture itself always continues. Returns true when a one-shot narration
+    /// was posted (the status chain holds it on screen for one frame).
+    private func retainTimelapseFrameIfNeeded(_ frame: SubFrame) -> Bool {
+        guard let store = timelapseStore, !timelapseRetentionStopped,
+              let image = frame.pixelData else { return false }
+        if store.count >= TimelapseFramePolicy.maxFrames {
+            guard !timelapseCapNarrated else { return false }
+            timelapseCapNarrated = true
+            statusDetail = "Timelapse frame cap reached (\(TimelapseFramePolicy.maxFrames)) — "
+                + "the clip covers the session so far; capture continues."
+            return true
+        }
+        if !TimelapseFramePolicy.shouldRetain(retainedCount: store.count,
+                                              freeDiskBytes: hooks.freeDiskBytes()) {
+            timelapseRetentionStopped = true
+            statusDetail = "Storage is tight — keeping the \(store.count) timelapse frames "
+                + "already saved; capture continues."
+            return true
+        }
+        store.append(image)   // best-effort: a failed write drops one frame, never the session
+        return false
+    }
+
+    /// Delete any retained frames without assembling (no-data exits).
+    private func discardTimelapseFrames() {
+        timelapseStore?.clear()
+        timelapseStore = nil
+    }
+
+    /// Consume the session's frame store and assemble, if there is anything to
+    /// assemble. Called on the normal Develop path.
+    private func assembleTimelapseIfNeeded() async {
+        guard let store = timelapseStore else { return }
+        timelapseStore = nil
+        await assembleTimelapse(from: store)
+    }
+
+    /// Encode the retained frames into `Documents/Timelapses/` at the user's
+    /// 24/30 fps choice, narrating progress. Never fatal: a failed assembly is
+    /// explained and the stacked image is untouched. The frame store is always
+    /// cleaned up. Generation-guarded so a session started mid-assembly (abort
+    /// path runs this detached) can never receive another session's clip.
+    private func assembleTimelapse(from store: TimelapseFrameStore) async {
+        defer { store.clear() }
+        guard store.count > 0 else { return }
+        let gen = generation
+        let fps = TimelapseFramePolicy.userFPS()
+        let total = store.count
+        statusDetail = "Assembling timelapse — \(total) frames at \(fps) fps…"
+        try? FileManager.default.createDirectory(at: TimelapseLibrary.directory,
+                                                 withIntermediateDirectories: true)
+        let outputURL = TimelapseLibrary.directory
+            .appendingPathComponent("StarFlow-Timelapse-\(UUID().uuidString).mp4")
+        // H.264 in the simulator (the bench-proven path); HEVC on device — the
+        // hardware encoder halves the file at the same quality.
+        #if targetEnvironment(simulator)
+        let codec = TimelapseAssembler.Codec.h264
+        #else
+        let codec = TimelapseAssembler.Codec.hevc
+        #endif
+        do {
+            let url = try await TimelapseAssembler().assemble(
+                frameURLs: store.frameURLs, fps: fps, outputURL: outputURL, codec: codec,
+                progress: { [weak self] done, count in
+                    // Throttled narration; hop back to the main actor to publish.
+                    guard done % 30 == 0, done < count else { return }
+                    Task { @MainActor in
+                        guard let self, gen == self.generation else { return }
+                        self.statusDetail = "Assembling timelapse — frame \(done) of \(count)…"
+                    }
+                })
+            guard gen == generation else { return }
+            timelapseVideoURL = url
+            let seconds = Int(TimelapseFramePolicy.clipSeconds(frames: total, fps: fps).rounded())
+            statusDetail = "Timelapse saved — \(total) frames become a \(seconds)-second clip "
+                + "at \(fps) fps."
+        } catch {
+            guard gen == generation else { return }
+            let reason = (error as? LocalizedError)?.errorDescription ?? "encoding failed"
+            statusDetail = "Timelapse assembly couldn't finish (\(reason)) — "
+                + "the stacked image is unaffected."
         }
     }
 
@@ -1593,6 +1727,7 @@ public final class SessionEngine: ObservableObject {
         if stats.subsSkippedClouds > 0 {
             line += " · \(stats.subsSkippedClouds) cloud frames waited out"
         }
+        if timelapseVideoURL != nil { line += " · timelapse clip saved" }
         return line
     }
 }

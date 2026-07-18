@@ -29,6 +29,11 @@ public struct ShotModeItem: Identifiable, Sendable {
     /// field, defaulted `nil` so pre-existing call sites keep compiling; only modes
     /// with a well-defined single target (Milky Way, Moon) set it.
     public let celestialTarget: CelestialTarget?
+    /// True when sessions of this mode retain per-sub frames for a timelapse
+    /// video export (bounded by `TimelapseFramePolicy`: 1080p-class downscale,
+    /// frame cap, storage pre-flight). Appended field, defaulted `false` so
+    /// pre-existing call sites keep compiling; only Night Timelapse sets it.
+    public let producesTimelapse: Bool
 
     public init(id: String, name: String, tagline: String, symbol: String,
                 recipe: CaptureRecipe, expectation: String, tutorial: [TutorialStep],
@@ -36,6 +41,7 @@ public struct ShotModeItem: Identifiable, Sendable {
                 cityViable: Bool, needsGimbal: Bool,
                 stackingStyle: StackingStyle = .registered,
                 celestialTarget: CelestialTarget? = nil,
+                producesTimelapse: Bool = false,
                 feasibility: @escaping @Sendable (SkyContext, SkyQuality) -> Feasibility) {
         self.id = id; self.name = name; self.tagline = tagline; self.symbol = symbol
         self.recipe = recipe; self.expectation = expectation; self.tutorial = tutorial
@@ -43,6 +49,7 @@ public struct ShotModeItem: Identifiable, Sendable {
         self.cityViable = cityViable; self.needsGimbal = needsGimbal
         self.stackingStyle = stackingStyle
         self.celestialTarget = celestialTarget
+        self.producesTimelapse = producesTimelapse
         self.feasibility = feasibility
     }
 }
@@ -305,9 +312,10 @@ public enum ShotModeRegistry {
         recipe: CaptureRecipe(exposureSeconds: 1.0, iso: 800, targetSubCount: 240,
                               nudgeTracking: false, intervalSeconds: 30),
         expectation: "One full-second exposure every 30 seconds: 240 frames over two hours become a "
-            + "ten-second clip of stars wheeling and clouds streaming. Night scenes stay bright and "
-            + "smooth because every frame is a real long exposure, not a starved snapshot. In v1 the "
-            + "gimbal holds framing rock-steady; a slow cinematic pan is on the roadmap.",
+            + "ten-second clip of stars wheeling and clouds streaming, assembled on-device into an "
+            + ".mp4 at your chosen 24 or 30 fps. Night scenes stay bright and smooth because every "
+            + "frame is a real long exposure, not a starved snapshot. In v1 the gimbal holds framing "
+            + "rock-steady; a slow cinematic pan is on the roadmap.",
         tutorial: [
             TutorialStep(id: 1, title: "What you're going for",
                 body: "240 frames across two hours playing back as a ten-second clip at 24 fps "
@@ -326,10 +334,11 @@ public enum ShotModeRegistry {
                     + "to check on the rig; a single touch shows as a jolt in the clip.",
                 symbol: "timer"),
             TutorialStep(id: 4, title: "What the app does",
-                body: "In v1 the gimbal holds framing while keep-alive micro-pulses between "
-                    + "frames stop the motors from sleeping (a slow cinematic pan is on the "
-                    + "roadmap). Thermal and battery guardians pause or end the session "
-                    + "gracefully, saving everything shot so far.",
+                body: "The gimbal holds framing while keep-alive micro-pulses between frames "
+                    + "stop the motors from sleeping (a slow cinematic pan is on the roadmap). "
+                    + "Every frame is kept for the clip, and Develop assembles the .mp4 at "
+                    + "your chosen frame rate. Guardians end gracefully, keeping everything "
+                    + "shot so far.",
                 symbol: "wand.and.stars"),
             TutorialStep(id: 5, title: "Pro tip",
                 body: "Battery is the real constraint: start above 60% or bring a power bank "
@@ -341,6 +350,7 @@ public enum ShotModeRegistry {
         cityViable: true,
         needsGimbal: true,
         stackingStyle: .unregistered,   // plain mean — timelapse frames need no star lock
+        producesTimelapse: true,        // per-sub frames become the exported .mp4 clip
         feasibility: { sky, _ in
             if sky.sunAltitudeDeg > 0 {
                 return .possible(note: "Daylight timelapses work, but stars wheeling over the "

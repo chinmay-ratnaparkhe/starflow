@@ -37,6 +37,27 @@ public struct SessionRecord: Codable, Identifiable, Equatable, Sendable {
     /// a session whose tail clouds ate on schedule is not a diverted flight.
     /// Optional: records from before this field decode as nil.
     public var subsLostToClouds: Int?
+    /// Catalog stars the star-colour calibration (feature 6) actually fitted
+    /// against. nil = the session never calibrated (or predates this field).
+    /// Only the engine's real `ColorCalibrator` result lands here — the share
+    /// card's "calibrated against N stars" line renders from this and nothing
+    /// else. Optional: records from before this field decode as nil.
+    public var calibrationStars: Int?
+    /// Reverse-geocoded city where the session ran — best-effort, stored only
+    /// when a location fix existed and geocoding succeeded (never guessed).
+    /// Powers the share card's optional location line; nil renders nothing.
+    /// Optional: records from before this field decode as nil.
+    public var locationCity: String?
+    /// True when the session's frames came from the simulated capture source
+    /// (simulator builds). Keeps the SIMULATED badge honest on share cards.
+    /// Optional: records from before this field decode as nil (treated as
+    /// real capture, matching how they were shared before this field).
+    public var simulatedCapture: Bool?
+    /// Filename of this session's assembled timelapse clip inside
+    /// `Documents/Timelapses/` (feature 8). Stored as a filename, not a path —
+    /// the app container moves between installs. Optional: nil for records
+    /// from before this field and for sessions that produced no clip.
+    public var timelapseFilename: String?
 
     public init(id: UUID, date: Date, shotID: String, shotName: String,
                 integrationSeconds: Double, subsAccepted: Int, subsRejected: Int,
@@ -44,7 +65,11 @@ public struct SessionRecord: Codable, Identifiable, Equatable, Sendable {
                 captureTilt: DeviceTilt? = nil,
                 skyCondition: SkyCondition? = nil,
                 subsSkippedClouds: Int? = nil,
-                subsLostToClouds: Int? = nil) {
+                subsLostToClouds: Int? = nil,
+                calibrationStars: Int? = nil,
+                locationCity: String? = nil,
+                simulatedCapture: Bool? = nil,
+                timelapseFilename: String? = nil) {
         self.id = id; self.date = date; self.shotID = shotID; self.shotName = shotName
         self.integrationSeconds = integrationSeconds
         self.subsAccepted = subsAccepted; self.subsRejected = subsRejected
@@ -54,6 +79,10 @@ public struct SessionRecord: Codable, Identifiable, Equatable, Sendable {
         self.skyCondition = skyCondition
         self.subsSkippedClouds = subsSkippedClouds
         self.subsLostToClouds = subsLostToClouds
+        self.calibrationStars = calibrationStars
+        self.locationCity = locationCity
+        self.simulatedCapture = simulatedCapture
+        self.timelapseFilename = timelapseFilename
     }
 
     /// True when the session stopped before reaching its planned sub count
@@ -151,6 +180,11 @@ public final class SessionStore: ObservableObject {
         let fm = FileManager.default
         try? fm.removeItem(at: Self.recordURL(record.id))
         try? fm.removeItem(at: Self.thumbnailURL(record.id))
+        // The session's timelapse clip belongs to this record — remove it too,
+        // so deleting the logbook entry never strands an orphan video on disk.
+        if let filename = record.timelapseFilename, !filename.isEmpty {
+            try? fm.removeItem(at: TimelapseLibrary.url(forFilename: filename))
+        }
         thumbnailCache[record.id] = nil
         records.removeAll { $0.id == record.id }
     }
