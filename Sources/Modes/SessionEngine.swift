@@ -470,7 +470,57 @@ public final class SessionEngine: ObservableObject {
             _ = await mount.waitSettled()
             lastMountActivityAt = hooks.now()
         }
+        if shot.needsGimbal, let target = shot.celestialTarget {
+            await runAimAssist(target: target)
+            try Task.checkCancellation()
+        }
         try await hooks.sleep(0.5)
+    }
+
+    /// Compass-coarse auto-aim before the manual framing confirm. Best-effort by
+    /// design: any failure (no location fix, no motion hardware, authority revoked,
+    /// envelope refusal…) falls back to manual framing with an explanatory status —
+    /// it must NEVER end the session.
+    private func runAimAssist(target: CelestialTarget) async {
+        guard mount.authority == .granted else {
+            statusDetail = "Squeeze the gimbal trigger for auto-aim, or frame manually."
+            return
+        }
+        guard let location = AppLocation.shared.current else {
+            statusDetail = "No location fix yet — frame \(target.displayName) manually."
+            return
+        }
+        let assist = AimAssist()
+        let coord = assist.resolve(target: target, location: location, date: hooks.now())
+        guard coord.altitudeDeg > 0 else {
+            statusDetail = "Aim Assist skipped: \(target.displayName) is below the horizon "
+                + "right now — frame manually or wait for it to rise."
+            return
+        }
+        statusDetail = "Aim Assist: slewing to \(target.displayName)…"
+        do {
+            let outcome = try await assist.slewToTarget(mount: mount, to: coord) { [weak self] stage in
+                if stage == .refining { self?.statusDetail = "Aim Assist: refining…" }
+            }
+            lastMountActivityAt = hooks.now()
+            if outcome.pitchClamped {
+                statusDetail = "Aimed as far as the tilt range allows — nudge the framing "
+                    + "by hand, then confirm."
+            } else {
+                statusDetail = "Target in frame — confirm framing."
+            }
+        } catch MountError.noAuthority {
+            statusDetail = "Squeeze the gimbal trigger for auto-aim, or frame manually."
+        } catch is CancellationError {
+            // Our own cancellation propagates from aimPhase's checkCancellation;
+            // a cancellation leaked by a dependency just means: frame manually.
+            statusDetail = "Aim Assist interrupted — frame \(target.displayName) manually."
+        } catch {
+            let reason = (error as? LocalizedError)?.errorDescription
+                ?? "the gimbal refused the move"
+            statusDetail = "Aim Assist couldn't finish (\(reason)) "
+                + "— frame \(target.displayName) manually."
+        }
     }
 
     // MARK: Calibrate — test impulse + settle check

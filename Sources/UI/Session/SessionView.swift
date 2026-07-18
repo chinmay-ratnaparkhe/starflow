@@ -105,6 +105,10 @@ struct SessionView: View {
                             gimbalWaitCard(night: night)
                                 .transition(.move(edge: .top).combined(with: .opacity))
                         }
+                        if phase == .aim, let target = shot.celestialTarget {
+                            aimAssistCard(target: target, night: night)
+                                .transition(.move(edge: .top).combined(with: .opacity))
+                        }
                         heroCard(stats: stats, night: night)
                         previewCard(phase: phase, stats: stats, preview: engine.latestPreview, night: night)
                         telemetryCard(stats: stats, phase: phase, night: night)
@@ -156,6 +160,43 @@ struct SessionView: View {
             flapsRecovered: stats.flapsRecovered,
             targetSubCount: shot.recipe.targetSubCount)
         SessionStore.shared.save(record, thumbnail: engine.latestPreview)
+    }
+
+    // MARK: - Aim Assist status card
+
+    /// Shown during the Aim phase for modes with a celestial target: names the
+    /// target, mirrors the engine's live status line, and is honest about the
+    /// compass-coarse accuracy so nobody expects telescope-grade pointing.
+    private func aimAssistCard(target: CelestialTarget, night: Bool) -> some View {
+        SFCard(accent: Theme.accent(night)) {
+            VStack(alignment: .leading, spacing: 10) {
+                HStack(spacing: 10) {
+                    Image(systemName: "scope")
+                        .font(.system(size: 20, weight: .medium))
+                        .foregroundStyle(Theme.accent(night))
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Aim Assist")
+                            .font(Theme.headline)
+                            .foregroundStyle(Theme.primaryText(night))
+                        Text("Target: \(target.displayName)")
+                            .font(Theme.caption)
+                            .foregroundStyle(Theme.secondaryText(night))
+                    }
+                    Spacer(minLength: 0)
+                }
+                Text(engine.statusDetail)
+                    .font(Theme.body)
+                    .foregroundStyle(Theme.primaryText(night))
+                    .fixedSize(horizontal: false, vertical: true)
+                    .contentTransition(.opacity)
+                    .animation(.easeInOut(duration: 0.25), value: engine.statusDetail)
+                Text("Compass-coarse aim: ±10° — fine-tune by hand if needed.")
+                    .font(Theme.caption)
+                    .foregroundStyle(Theme.secondaryText(night))
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .accessibilityElement(children: .combine)
+        }
     }
 
     // MARK: - Gimbal never docks: guide card + school sheet

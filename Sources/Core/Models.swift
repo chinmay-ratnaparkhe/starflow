@@ -183,6 +183,21 @@ public enum StackingStyle: String, Equatable, Sendable {
 
 // MARK: - Shot modes
 
+/// A sky target Aim Assist can slew to automatically during the Aim phase.
+/// Raw values are stable strings so shot-mode definitions stay declarative.
+public enum CelestialTarget: String, Sendable {
+    case milkyWayCore
+    case moon
+
+    /// Human name as used in live status copy ("Aim Assist: slewing to the Milky Way…").
+    public var displayName: String {
+        switch self {
+        case .milkyWayCore: return "the Milky Way"
+        case .moon: return "the Moon"
+        }
+    }
+}
+
 public enum Feasibility: Equatable, Sendable {
     case great
     case possible(note: String)

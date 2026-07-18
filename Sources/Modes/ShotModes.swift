@@ -25,18 +25,24 @@ public struct ShotModeItem: Identifiable, Sendable {
     /// this). Appended field, defaulted `.registered` so pre-existing call sites keep
     /// compiling; only trails/timelapse override it.
     public let stackingStyle: StackingStyle
+    /// Sky target Aim Assist slews to automatically during the Aim phase. Appended
+    /// field, defaulted `nil` so pre-existing call sites keep compiling; only modes
+    /// with a well-defined single target (Milky Way, Moon) set it.
+    public let celestialTarget: CelestialTarget?
 
     public init(id: String, name: String, tagline: String, symbol: String,
                 recipe: CaptureRecipe, expectation: String, tutorial: [TutorialStep],
                 checklist: [String] = [],
                 cityViable: Bool, needsGimbal: Bool,
                 stackingStyle: StackingStyle = .registered,
+                celestialTarget: CelestialTarget? = nil,
                 feasibility: @escaping @Sendable (SkyContext, SkyQuality) -> Feasibility) {
         self.id = id; self.name = name; self.tagline = tagline; self.symbol = symbol
         self.recipe = recipe; self.expectation = expectation; self.tutorial = tutorial
         self.checklist = checklist
         self.cityViable = cityViable; self.needsGimbal = needsGimbal
         self.stackingStyle = stackingStyle
+        self.celestialTarget = celestialTarget
         self.feasibility = feasibility
     }
 }
@@ -98,6 +104,7 @@ public enum ShotModeRegistry {
         checklist: ModeChecklists.milkyWay,
         cityViable: false,
         needsGimbal: true,
+        celestialTarget: .milkyWayCore,
         feasibility: { sky, quality in
             if quality == .city {
                 return .notTonight(reason: "City skyglow buries the Milky Way — even a perfect stack "
@@ -222,6 +229,7 @@ public enum ShotModeRegistry {
         checklist: ModeChecklists.lunar,
         cityViable: true,
         needsGimbal: true,
+        celestialTarget: .moon,
         feasibility: { sky, _ in
             if sky.moon.illuminatedFraction <= 0.1 {
                 return .notTonight(reason: "The Moon is new (or a hair-thin sliver) — there's almost "
