@@ -126,6 +126,58 @@ final class TrailsBlenderTests: XCTestCase {
         XCTAssertNotNil(blender.finalImage())
     }
 
+    /// COLOUR (field-report regression: finals came out grayscale): a warm-tinted
+    /// star must keep its tint along the whole trail — the max blend runs per
+    /// channel and the output image is genuinely RGB.
+    func testTrailsKeepStarColorAlongTheArc() throws {
+        let frameCount = 6
+        let stepX = 8.0
+        let startX = 40.0, y = 40.0
+        let tint = (r: 1.0, g: 0.55, b: 0.35)   // warm orange star
+
+        let blender = TrailsBlender()
+        blender.reset(width: Self.width, height: Self.height)
+
+        for i in 0..<frameCount {
+            let base = render(stars: [(x: startX + stepX * Double(i), y: y)])
+            // Neutral pedestal, tinted star: plane_c = pedestal + (star − pedestal)·tint_c.
+            let r = base.map { 0.05 + ($0 - 0.05) * Float(tint.r) }
+            let g = base.map { 0.05 + ($0 - 0.05) * Float(tint.g) }
+            let b = base.map { 0.05 + ($0 - 0.05) * Float(tint.b) }
+            let image = try XCTUnwrap(
+                CPUStacker.rgbImage(r: r, g: g, b: b, width: Self.width, height: Self.height))
+            let frame = SubFrame(index: i, timestamp: Date(), exposureSeconds: 1.0, iso: 400,
+                                 pixelData: image)
+            XCTAssertTrue(blender.add(frame: frame), "colour frame \(i) must be accepted")
+        }
+
+        // Every star position along the arc must stay red-leaning in the blend.
+        let rgb = blender.accumulatedRGBMax()
+        for i in 0..<frameCount {
+            let idx = Int(y) * Self.width + Int(startX + stepX * Double(i))
+            XCTAssertGreaterThan(rgb.r[idx] - rgb.b[idx], 0.3,
+                                 "trail lost its colour at arc position \(i)")
+        }
+
+        // The final image is a real colour image with visible channel variance.
+        let final = try XCTUnwrap(blender.finalImage())
+        XCTAssertEqual(final.colorSpace?.model, .rgb, "trails final must be RGB, not gray")
+        let planes = try XCTUnwrap(
+            CPUStacker.rgbFloats(from: final, width: final.width, height: final.height))
+        var maxSpread: Float = 0
+        for i in 0..<planes.r.count {
+            let hi = max(planes.r[i], planes.g[i], planes.b[i])
+            let lo = min(planes.r[i], planes.g[i], planes.b[i])
+            maxSpread = max(maxSpread, hi - lo)
+        }
+        XCTAssertGreaterThan(maxSpread, 0.3, "trail image must be visibly coloured")
+
+        // Luminance accessor still tracks the streak for the legacy geometry checks.
+        let streak = horizontalExtent(in: blender.accumulatedMax(), aroundY: Int(y))
+        XCTAssertGreaterThanOrEqual(streak, Int(stepX * Double(frameCount - 1)),
+                                    "colour blend must still draw the full streak")
+    }
+
     /// Undecodable frames and washed-out frames (headlights across the lens) are
     /// rejected and counted; a washout must not bleach the accumulated trails.
     func testRejectsUndecodableAndWashedOutFrames() throws {

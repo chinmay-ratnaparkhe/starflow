@@ -288,11 +288,14 @@ private struct LogbookDetailSheet: View {
                 SFSectionLabel("The stack")
                 if let thumbnail {
                     let image = Image(decorative: thumbnail, scale: 1)
+                    // scaledToFit: show the stack's true aspect/orientation —
+                    // exactly what the share button hands out.
                     image
                         .resizable()
-                        .scaledToFill()
+                        .scaledToFit()
                         .frame(height: 220)
                         .frame(maxWidth: .infinity)
+                        .background(Color.black)
                         .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
                         .colorMultiply(night ? Theme.nightRed : .white)
                     ShareLink(item: image,

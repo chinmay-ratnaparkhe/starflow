@@ -282,5 +282,10 @@ public struct SessionStats: Sendable {
     public var nudges: Int = 0
     public var flapsRecovered: Int = 0
     public var startedAt: Date?
+    /// How the phone was physically held in the clamp (CoreMotion gravity —
+    /// the UI is portrait-locked, so interface orientation can't tell).
+    /// Sampled at session start and re-sampled when the Capture phase begins;
+    /// drives the develop-phase rotation that makes the final image upright.
+    public var captureTilt: DeviceTilt = .portrait
     public init() {}
 }

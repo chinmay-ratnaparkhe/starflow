@@ -158,7 +158,10 @@ struct SessionView: View {
             subsRejected: stats.subsRejected,
             nudges: stats.nudges,
             flapsRecovered: stats.flapsRecovered,
-            targetSubCount: shot.recipe.targetSubCount)
+            targetSubCount: shot.recipe.targetSubCount,
+            captureTilt: stats.captureTilt)
+        // latestPreview is already rotated upright by the engine's develop phase,
+        // so the logbook thumbnail and share sheet inherit the correct orientation.
         SessionStore.shared.save(record, thumbnail: engine.latestPreview)
     }
 
@@ -356,11 +359,15 @@ struct SessionView: View {
                 }
                 ZStack {
                     if let preview {
+                        // scaledToFit, not Fill: the card must show the stack's TRUE
+                        // aspect (field report: a fill-cropped landscape stack read
+                        // as portrait in-app while the export was landscape).
                         Image(decorative: preview, scale: 1)
                             .resizable()
-                            .scaledToFill()
+                            .scaledToFit()
                             .frame(height: 220)
                             .frame(maxWidth: .infinity)
+                            .background(Color.black)
                             .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
                             .colorMultiply(night ? Theme.nightRed : .white)
                     } else {
@@ -819,11 +826,14 @@ private struct LandingReport: View {
                 SFCard {
                     VStack(alignment: .leading, spacing: 12) {
                         SFSectionLabel("Your stack")
+                        // scaledToFit: the landing report must show exactly the
+                        // aspect and orientation the share/export will have.
                         image
                             .resizable()
-                            .scaledToFill()
+                            .scaledToFit()
                             .frame(height: 240)
                             .frame(maxWidth: .infinity)
+                            .background(Color.black)
                             .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
                             .colorMultiply(night ? Theme.nightRed : .white)
                             .overlay(alignment: .topTrailing) {

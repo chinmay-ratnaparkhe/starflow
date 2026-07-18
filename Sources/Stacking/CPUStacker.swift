@@ -153,7 +153,8 @@ public final class CPUStacker: Stacking {
         lock.lock(); defer { lock.unlock() }
         guard width > 0, height > 0,
               let image = frame.pixelData,
-              let gray = Self.grayscaleFloats(from: image, width: width, height: height) else {
+              let gray = Self.grayscaleFloats(from: image, width: width, height: height),
+              let rgb = Self.rgbFloats(from: image, width: width, height: height) else {
             rejectedCount += 1
             lastRejectionReason = "frame could not be decoded"
             return false
@@ -208,7 +209,7 @@ public final class CPUStacker: Stacking {
             lastResidualPx = reg.residualPx
         }
 
-        accumulate(gray, transform: transform)
+        accumulate(gray, rgb: rgb, transform: transform)
         acceptedCount += 1
         integration += max(0, frame.exposureSeconds)
         lastRejectionReason = nil
@@ -230,10 +231,17 @@ public final class CPUStacker: Stacking {
 
     // MARK: - Extra accessors (tests, session telemetry)
 
-    /// Copy of the accumulated linear mean buffer (row-major, 0…1).
+    /// Copy of the accumulated linear LUMINANCE mean buffer (row-major, 0…1) —
+    /// the plane detection, registration, and kappa clipping run on.
     public func accumulatedMean() -> [Float] {
         lock.lock(); defer { lock.unlock() }
         return meanBuf
+    }
+
+    /// Copies of the accumulated linear per-channel mean buffers (row-major, 0…1).
+    public func accumulatedRGB() -> (r: [Float], g: [Float], b: [Float]) {
+        lock.lock(); defer { lock.unlock() }
+        return (meanR, meanG, meanB)
     }
 
     public func dimensions() -> (width: Int, height: Int) {
@@ -243,8 +251,18 @@ public final class CPUStacker: Stacking {
 
     // MARK: - Accumulation
 
-    private func accumulate(_ frame: [Float], transform t: SimilarityTransform) {
+    private func accumulate(_ frame: [Float],
+                            rgb: (r: [Float], g: [Float], b: [Float]),
+                            transform t: SimilarityTransform) {
         let kappa = kappaSigma
+        @inline(__always)
+        func bilinear(_ plane: [Float], _ src: Int, _ ax: Float, _ ay: Float) -> Float {
+            let v00 = plane[src], v01 = plane[src + 1]
+            let v10 = plane[src + width], v11 = plane[src + width + 1]
+            let top = v00 + (v01 - v00) * ax
+            let bottom = v10 + (v11 - v10) * ax
+            return top + (bottom - top) * ay
+        }
         for yi in 0..<height {
             let yd = Double(yi)
             let outRow = yi * width
@@ -256,14 +274,11 @@ public final class CPUStacker: Stacking {
                 let ax = Float(fx - Double(x0))
                 let ay = Float(fy - Double(y0))
                 let src = y0 * width + x0
-                let v00 = frame[src], v01 = frame[src + 1]
-                let v10 = frame[src + width], v11 = frame[src + width + 1]
-                let top = v00 + (v01 - v00) * ax
-                let bottom = v10 + (v11 - v10) * ax
-                let value = top + (bottom - top) * ay
+                let value = bilinear(frame, src, ax, ay)
 
                 let idx = outRow + xi
                 let n0 = countBuf[idx]
+                // Kappa-sigma decision on LUMINANCE, applied to all channels jointly.
                 if let kappa, n0 >= 4 {
                     let variance = m2Buf[idx] / (n0 - 1)
                     if variance > 0 {
@@ -276,12 +291,20 @@ public final class CPUStacker: Stacking {
                 let delta = value - meanBuf[idx]
                 meanBuf[idx] += delta / n1
                 m2Buf[idx] += delta * (value - meanBuf[idx])
+                meanR[idx] += (bilinear(rgb.r, src, ax, ay) - meanR[idx]) / n1
+                meanG[idx] += (bilinear(rgb.g, src, ax, ay) - meanG[idx]) / n1
+                meanB[idx] += (bilinear(rgb.b, src, ax, ay) - meanB[idx]) / n1
             }
         }
     }
 
-    // MARK: - Preview (asinh stretch)
+    // MARK: - Preview (asinh stretch, colour-preserving)
 
+    /// Colour preview. The asinh stretch is computed on LUMINANCE, and each channel
+    /// is multiplied by the same gain f(L)/L (rather than being stretched
+    /// independently), so bright stars keep their colour instead of washing to
+    /// white — the classic f(L)/L trick. Per-channel background (sigma-clipped
+    /// mean) is subtracted first, which also neutralises the sky-glow colour cast.
     private func previewLocked() -> CGImage? {
         guard acceptedCount > 0, width > 0, height > 0 else { return nil }
         var maxV: Float = 0
@@ -291,12 +314,23 @@ public final class CPUStacker: Stacking {
         let range = Double(max(1e-6, maxV - black))
         let beta = 0.05
         let norm = 1.0 / asinh(1.0 / beta)
-        var stretched = [Float](repeating: 0, count: meanBuf.count)
-        for i in 0..<meanBuf.count {
+        let zeroGain = norm / beta            // lim u→0 of asinh(u/β)·norm / u
+        let blackR = Float(Self.clippedStats(meanR).mean)
+        let blackG = Float(Self.clippedStats(meanG).mean)
+        let blackB = Float(Self.clippedStats(meanB).mean)
+        let count = meanBuf.count
+        var outR = [Float](repeating: 0, count: count)
+        var outG = [Float](repeating: 0, count: count)
+        var outB = [Float](repeating: 0, count: count)
+        for i in 0..<count {
             let u = min(1.0, max(0.0, Double(meanBuf[i] - black) / range))
-            stretched[i] = Float(asinh(u / beta) * norm)
+            let gain = u > 1e-6 ? asinh(u / beta) * norm / u : zeroGain
+            let g = Float(gain / range)
+            outR[i] = min(1, max(0, (meanR[i] - blackR) * g))
+            outG[i] = min(1, max(0, (meanG[i] - blackG) * g))
+            outB[i] = min(1, max(0, (meanB[i] - blackB) * g))
         }
-        return Self.grayImage(from: stretched, width: width, height: height)
+        return Self.rgbImage(r: outR, g: outG, b: outB, width: width, height: height)
     }
 
     // MARK: - Image I/O helpers (public: reused by the simulator capture path & tests)
@@ -341,6 +375,74 @@ public final class CPUStacker: Stacking {
             for x in 0..<width {
                 let v = values[src + x]
                 out[dst + x] = UInt8(min(255, max(0, v * 255 + 0.5)))
+            }
+        }
+        return ctx.makeImage()
+    }
+
+    /// Draw any CGImage into a `width`×`height` 8-bit RGBA grid and return three
+    /// float planes (r, g, b) 0…1. Grayscale sources come back with r == g == b.
+    public static func rgbFloats(from image: CGImage, width: Int, height: Int)
+        -> (r: [Float], g: [Float], b: [Float])? {
+        guard width > 0, height > 0 else { return nil }
+        let count = width * height
+        var bytes = [UInt8](repeating: 0, count: count * 4)
+        let drew: Bool = bytes.withUnsafeMutableBytes { raw in
+            guard let base = raw.baseAddress,
+                  let ctx = CGContext(data: base, width: width, height: height,
+                                      bitsPerComponent: 8, bytesPerRow: width * 4,
+                                      space: CGColorSpaceCreateDeviceRGB(),
+                                      bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue) else { return false }
+            ctx.interpolationQuality = .high
+            ctx.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+            return true
+        }
+        guard drew else { return nil }
+        var r = [Float](repeating: 0, count: count)
+        var g = [Float](repeating: 0, count: count)
+        var b = [Float](repeating: 0, count: count)
+        bytes.withUnsafeBufferPointer { buf in
+            guard let base = buf.baseAddress else { return }
+            vDSP_vfltu8(base, 4, &r, 1, vDSP_Length(count))
+            vDSP_vfltu8(base + 1, 4, &g, 1, vDSP_Length(count))
+            vDSP_vfltu8(base + 2, 4, &b, 1, vDSP_Length(count))
+        }
+        var scale: Float = 1.0 / 255.0
+        func scaleInPlace(_ plane: inout [Float]) {
+            plane.withUnsafeMutableBufferPointer { p in
+                guard let base = p.baseAddress else { return }
+                vDSP_vsmul(base, 1, &scale, base, 1, vDSP_Length(count))
+            }
+        }
+        scaleInPlace(&r)
+        scaleInPlace(&g)
+        scaleInPlace(&b)
+        return (r, g, b)
+    }
+
+    /// 8-bit RGB CGImage from three row-major float planes clamped to 0…1.
+    public static func rgbImage(r: [Float], g: [Float], b: [Float],
+                                width: Int, height: Int) -> CGImage? {
+        let count = width * height
+        guard width > 0, height > 0,
+              r.count == count, g.count == count, b.count == count,
+              let ctx = CGContext(data: nil, width: width, height: height,
+                                  bitsPerComponent: 8, bytesPerRow: 0,
+                                  space: CGColorSpaceCreateDeviceRGB(),
+                                  bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue),
+              let data = ctx.data else { return nil }
+        let rowBytes = ctx.bytesPerRow
+        let out = data.assumingMemoryBound(to: UInt8.self)
+        for y in 0..<height {
+            let src = y * width
+            let dst = y * rowBytes
+            for x in 0..<width {
+                let i = src + x
+                let o = dst + x * 4
+                out[o]     = UInt8(min(255, max(0, r[i] * 255 + 0.5)))
+                out[o + 1] = UInt8(min(255, max(0, g[i] * 255 + 0.5)))
+                out[o + 2] = UInt8(min(255, max(0, b[i] * 255 + 0.5)))
+                out[o + 3] = 255
             }
         }
         return ctx.makeImage()

@@ -42,6 +42,14 @@ public struct SessionHooks {
     /// simulated source with a "SIMULATED" pill so fake stars can never masquerade as
     /// real data. Declared with a default so the memberwise init keeps its signature.
     public var isSimulatedCapture: Bool = false
+    /// Physical device tilt seam (CoreMotion gravity — the UI is portrait-locked,
+    /// so interface orientation is useless in the gimbal clamp). The engine warms
+    /// this up at session start and takes the authoritative sample when Capture
+    /// begins; the develop phase rotates the final image upright accordingly.
+    /// Declared with a default so the memberwise init keeps its signature.
+    public var captureTilt: @MainActor () -> DeviceTilt = {
+        GravityTiltProvider.shared.sampleTilt()
+    }
 
     public init(prepareCapture: @escaping (CaptureRecipe) async throws -> (width: Int, height: Int),
                 captureSub: @escaping (CaptureRecipe, Int) async throws -> SubFrame,
@@ -112,6 +120,8 @@ public extension SessionHooks {
             },
             endCapture: {
                 await CaptureEngineBridge.teardown()
+                // Stop gravity sampling with the camera — every exit path lands here.
+                await GravityTiltProvider.shared.stopUpdates()
             },
             thermalState: { ProcessInfo.processInfo.thermalState },
             batteryPercent: { SessionHooks.systemBatteryPercent() },
@@ -328,6 +338,11 @@ public final class SessionEngine: ObservableObject {
         latestPreview = nil
         var fresh = SessionStats()
         fresh.startedAt = hooks.now()
+        // Warm the gravity sampler up and take a provisional tilt reading; the
+        // authoritative sample lands when the Capture phase begins (the phone is
+        // clamped and framed by then). Portrait UI lock makes gravity the only
+        // honest orientation source.
+        fresh.captureTilt = hooks.captureTilt()
         stats = fresh
         phase = .connect
         statusDetail = "Starting \(shot.name)…"
@@ -354,7 +369,7 @@ public final class SessionEngine: ObservableObject {
             await endCapture()
         }
         if hadData {
-            if let final = stacker.finalImage() { latestPreview = final }
+            if let final = stacker.finalImage() { latestPreview = oriented(final) }
             phase = .complete
             statusDetail = "Session ended early — \(stats.subsAccepted) frames kept."
         } else {
@@ -591,6 +606,10 @@ public final class SessionEngine: ObservableObject {
             statusDetail = error.errorDescription ?? "Camera setup failed."
             throw Halt.graceful
         }
+        // Authoritative tilt sample: framing is confirmed and the phone sits in
+        // the clamp exactly the way it will for every sub. This drives the
+        // develop-phase rotation that makes the final image match the live view.
+        stats.captureTilt = hooks.captureTilt()
         stacker.reset(width: dims.width, height: dims.height)
         statusDetail = "Capturing…"
 
@@ -616,7 +635,9 @@ public final class SessionEngine: ObservableObject {
                 rejectionStreak = 0
                 noStarStreak = 0
                 if stats.subsAccepted % previewEvery == 0 {
-                    latestPreview = stacker.currentResult().preview ?? latestPreview
+                    // Rotated the same way as the final image, so the live view
+                    // and the landing report can never disagree on orientation.
+                    latestPreview = oriented(stacker.currentResult().preview) ?? latestPreview
                 }
             } else {
                 stats.subsRejected += 1
@@ -658,10 +679,22 @@ public final class SessionEngine: ObservableObject {
         statusDetail = "Developing — stacking \(stats.subsAccepted) frames…"
         await hooks.endCapture()
         if let final = stacker.finalImage() {
-            latestPreview = final
+            latestPreview = oriented(final)
         } else if let preview = stacker.currentResult().preview {
-            latestPreview = preview
+            latestPreview = oriented(preview)
         }
+    }
+
+    /// Rotate a stacker output so it displays upright for the way the phone was
+    /// physically held (Seattle field report: sensor-native landscape frames were
+    /// exported sideways). The Logbook thumbnail and the share sheet both read
+    /// `latestPreview`, so orienting here fixes every downstream surface at once.
+    /// Simulated sources synthesize upright frames — no rotation applies.
+    private func oriented(_ image: CGImage?) -> CGImage? {
+        guard let image else { return nil }
+        guard !hooks.isSimulatedCapture else { return image }
+        let rotation = ImageOrientation.rotationToUpright(for: stats.captureTilt)
+        return ImageOrientation.rotated(image, by: rotation) ?? image
     }
 
     // MARK: Pause + flap gateway

@@ -101,10 +101,12 @@ the complete app against a physics stand-in gimbal and a synthetic drifting star
   sky quality; `StorageBudget` pre-flights disk usage; `TimelapseAssembler` builds
   motion-timelapse output.
 - **Stacking** — `CPUStacker`: star detection, translation + rotation registration
-  (Procrustes on matched centroids), running mean with kappa-sigma clipping, asinh
-  preview. Honest scope: a monochrome luminance stack for live progress and the
-  landing report, not a color-calibrated final image. `TrailsBlender`:
-  brightest-pixel blending for star trails.
+  (Procrustes on matched centroids) on a luminance derivative, full-color per-channel
+  running mean with kappa-sigma clipping (decided on luminance, applied jointly),
+  color asinh preview via the luminance-scaled f(L)/L stretch so star color survives.
+  Honest scope: a color stack, not a color-CALIBRATED final image (no matrix or
+  white-balance fit). `TrailsBlender`: per-channel brightest-pixel blending for
+  color star trails.
 - **Modes** — `ShotModeRegistry`: nine shot modes (Milky Way Stack, Star Trails,
   Lunar, ISS Pass, Motion Timelapse, Cityscape, Aurora, Meteor Shower, Conjunction),
   each with a recipe, feasibility gate, tutorial, setup checklist, and honest

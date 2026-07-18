@@ -20,15 +20,21 @@ public struct SessionRecord: Codable, Identifiable, Equatable, Sendable {
     public var nudges: Int
     public var flapsRecovered: Int
     public var targetSubCount: Int
+    /// How the phone was physically held during capture (CoreMotion gravity),
+    /// stored so the session is self-describing about the orientation applied
+    /// to its final image. Optional: records from before this field decode as nil.
+    public var captureTilt: DeviceTilt?
 
     public init(id: UUID, date: Date, shotID: String, shotName: String,
                 integrationSeconds: Double, subsAccepted: Int, subsRejected: Int,
-                nudges: Int, flapsRecovered: Int, targetSubCount: Int) {
+                nudges: Int, flapsRecovered: Int, targetSubCount: Int,
+                captureTilt: DeviceTilt? = nil) {
         self.id = id; self.date = date; self.shotID = shotID; self.shotName = shotName
         self.integrationSeconds = integrationSeconds
         self.subsAccepted = subsAccepted; self.subsRejected = subsRejected
         self.nudges = nudges; self.flapsRecovered = flapsRecovered
         self.targetSubCount = targetSubCount
+        self.captureTilt = captureTilt
     }
 
     /// True when the session stopped before reaching its planned sub count

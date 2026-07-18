@@ -2,9 +2,10 @@ import XCTest
 import CoreGraphics
 @testable import StarFlow
 
-/// CPU stacker verification on synthetic gaussian starfields (no hardware, no fixtures).
-/// Design gate: 8 frames shifted up to 6 px and rotated up to 1°, ≥ 7 accepted,
-/// final alignment error < 0.7 px at the brightest star; pure noise frames rejected.
+/// CPU stacker verification on synthetic COLOURED gaussian starfields (no hardware,
+/// no fixtures). Design gate: 8 frames shifted up to 6 px and rotated up to 1°,
+/// ≥ 7 accepted, final alignment error < 0.7 px at the brightest star; pure noise
+/// frames rejected; the final image is genuinely colour (non-grayscale).
 final class StackerTests: XCTestCase {
 
     private static let width = 400
@@ -34,29 +35,49 @@ final class StackerTests: XCTestCase {
         }
     }
 
-    // MARK: - Synthetic starfield
+    // MARK: - Synthetic starfield (COLOURED — the pipeline stacks RGB)
 
     private struct SynthStar {
         var x: Double
         var y: Double
         var amp: Double
         var sigma: Double
+        var tintR: Double
+        var tintG: Double
+        var tintB: Double
+    }
+
+    /// Luminance-normalised star tint: 0 = warm orange (K/M star), 1 = blue-white
+    /// (B/A star). Normalising by Rec.709 luminance keeps `amp` meaning "brightness",
+    /// so detection statistics match the old grayscale field.
+    private static func tint(_ t: Double) -> (r: Double, g: Double, b: Double) {
+        var r = 1.0 - 0.45 * t          // 1.00 → 0.55
+        var g = 0.72 + 0.08 * t          // 0.72 → 0.80
+        var b = 0.50 + 0.50 * t          // 0.50 → 1.00
+        let lum = 0.2126 * r + 0.7152 * g + 0.0722 * b
+        r /= lum; g /= lum; b /= lum
+        return (r, g, b)
     }
 
     /// Anchor star (index 0) is the brightest, at a known subpixel position —
-    /// the ground truth for the alignment assertion.
+    /// the ground truth for the alignment assertion. It is strongly WARM so the
+    /// colour-preservation assertions have a known target.
     private static let anchorX = 137.4
     private static let anchorY = 88.7
 
     private func makeStarField(rng: inout SplitMix64) -> [SynthStar] {
+        let warm = Self.tint(0)
         var stars: [SynthStar] = [
-            SynthStar(x: Self.anchorX, y: Self.anchorY, amp: 0.80, sigma: 1.6)
+            SynthStar(x: Self.anchorX, y: Self.anchorY, amp: 0.80, sigma: 1.6,
+                      tintR: warm.r, tintG: warm.g, tintB: warm.b)
         ]
         while stars.count < 40 {
+            let c = Self.tint(rng.uniform())
             let candidate = SynthStar(x: rng.uniform(25, Double(Self.width - 25)),
                                       y: rng.uniform(25, Double(Self.height - 25)),
                                       amp: rng.uniform(0.25, 0.55),
-                                      sigma: rng.uniform(1.2, 1.8))
+                                      sigma: rng.uniform(1.2, 1.8),
+                                      tintR: c.r, tintG: c.g, tintB: c.b)
             let clear = stars.allSatisfy { hypot($0.x - candidate.x, $0.y - candidate.y) > 16 }
             if clear { stars.append(candidate) }
         }
@@ -64,14 +85,20 @@ final class StackerTests: XCTestCase {
     }
 
     /// Render the field translated by (dx, dy) and rotated by rotationDeg about the
-    /// image centre, over a 0.05 pedestal with gaussian noise. Values clamped 0…1.
+    /// image centre, over a 0.05 pedestal with independent per-channel gaussian
+    /// noise. Three colour planes, values clamped 0…1.
     private func render(stars: [SynthStar], dx: Double, dy: Double, rotationDeg: Double,
-                        noiseSigma: Double, rng: inout SplitMix64) -> [Float] {
+                        noiseSigma: Double, rng: inout SplitMix64)
+        -> (r: [Float], g: [Float], b: [Float]) {
         let w = Self.width, h = Self.height
-        var buffer = [Float](repeating: 0.05, count: w * h)
+        var bufR = [Float](repeating: 0.05, count: w * h)
+        var bufG = [Float](repeating: 0.05, count: w * h)
+        var bufB = [Float](repeating: 0.05, count: w * h)
         if noiseSigma > 0 {
-            for i in 0..<buffer.count {
-                buffer[i] += Float(noiseSigma * rng.gaussian())
+            for i in 0..<bufR.count {
+                bufR[i] += Float(noiseSigma * rng.gaussian())
+                bufG[i] += Float(noiseSigma * rng.gaussian())
+                bufB[i] += Float(noiseSigma * rng.gaussian())
             }
         }
         let theta = rotationDeg * .pi / 180
@@ -90,19 +117,59 @@ final class StackerTests: XCTestCase {
                 for x in x0...x1 {
                     let ddx = Double(x) - px
                     let ddy = Double(y) - py
-                    buffer[y * w + x] += Float(star.amp * exp(-(ddx * ddx + ddy * ddy) * inv))
+                    let psf = star.amp * exp(-(ddx * ddx + ddy * ddy) * inv)
+                    let i = y * w + x
+                    bufR[i] += Float(psf * star.tintR)
+                    bufG[i] += Float(psf * star.tintG)
+                    bufB[i] += Float(psf * star.tintB)
                 }
             }
         }
-        for i in 0..<buffer.count {
-            buffer[i] = min(1, max(0, buffer[i]))
+        for i in 0..<bufR.count {
+            bufR[i] = min(1, max(0, bufR[i]))
+            bufG[i] = min(1, max(0, bufG[i]))
+            bufB[i] = min(1, max(0, bufB[i]))
         }
-        return buffer
+        return (bufR, bufG, bufB)
     }
 
+    /// Rec.709 luminance plane of a colour render (for direct detection tests).
+    private func luminance(_ p: (r: [Float], g: [Float], b: [Float])) -> [Float] {
+        var out = [Float](repeating: 0, count: p.r.count)
+        for i in 0..<out.count {
+            out[i] = 0.2126 * p.r[i] + 0.7152 * p.g[i] + 0.0722 * p.b[i]
+        }
+        return out
+    }
+
+    private func makeImage(_ planes: (r: [Float], g: [Float], b: [Float])) throws -> CGImage {
+        try XCTUnwrap(CPUStacker.rgbImage(r: planes.r, g: planes.g, b: planes.b,
+                                          width: Self.width, height: Self.height),
+                      "failed to build synthetic colour CGImage")
+    }
+
+    /// Neutral (gray) colour image from a single plane — for flat/noise frames.
     private func makeImage(_ values: [Float]) throws -> CGImage {
-        try XCTUnwrap(CPUStacker.grayImage(from: values, width: Self.width, height: Self.height),
+        try XCTUnwrap(CPUStacker.rgbImage(r: values, g: values, b: values,
+                                          width: Self.width, height: Self.height),
                       "failed to build synthetic CGImage")
+    }
+
+    /// Non-grayscale metric: per-pixel channel spread (max − min across r,g,b) of a
+    /// CGImage, plus how many pixels are visibly coloured (spread > 0.08 ≈ 20/255).
+    private func channelSpread(of image: CGImage) throws -> (maxSpread: Float, coloredPixels: Int) {
+        let planes = try XCTUnwrap(
+            CPUStacker.rgbFloats(from: image, width: image.width, height: image.height))
+        var maxSpread: Float = 0
+        var colored = 0
+        for i in 0..<planes.r.count {
+            let hi = max(planes.r[i], planes.g[i], planes.b[i])
+            let lo = min(planes.r[i], planes.g[i], planes.b[i])
+            let spread = hi - lo
+            maxSpread = max(maxSpread, spread)
+            if spread > 0.08 { colored += 1 }
+        }
+        return (maxSpread, colored)
     }
 
     private func makeFrame(index: Int, image: CGImage) -> SubFrame {
@@ -174,7 +241,26 @@ final class StackerTests: XCTestCase {
                           "stacked anchor star drifted \(errorPx) px from reference")
 
         XCTAssertNotNil(result.preview)
-        XCTAssertNotNil(stacker.finalImage())
+
+        // COLOUR (field-report regression: the final image came out grayscale).
+        // The stack must produce a genuinely colour image: RGB colour model, with
+        // real channel variance where the tinted stars are.
+        let final = try XCTUnwrap(stacker.finalImage())
+        XCTAssertEqual(final.colorSpace?.model, .rgb, "final image must be RGB, not gray")
+        let spread = try channelSpread(of: final)
+        XCTAssertGreaterThan(spread.maxSpread, 0.1,
+                             "tinted stars must survive stacking + stretch in colour "
+                             + "(max channel spread \(spread.maxSpread))")
+        XCTAssertGreaterThan(spread.coloredPixels, 20,
+                             "a whole starfield of tinted stars must leave many coloured "
+                             + "pixels, found \(spread.coloredPixels)")
+
+        // Star colour direction check: the warm anchor must stay red-leaning
+        // (r > b at its stacked position) — the f(L)/L stretch preserves hue.
+        let rgb = stacker.accumulatedRGB()
+        let anchorIdx = Int(Self.anchorY.rounded()) * Self.width + Int(Self.anchorX.rounded())
+        XCTAssertGreaterThan(rgb.r[anchorIdx], rgb.b[anchorIdx],
+                             "warm anchor star lost its colour in the linear stack")
     }
 
     /// A frame of pure noise (clouds rolled in / lens cap) must be rejected and counted.
@@ -204,8 +290,8 @@ final class StackerTests: XCTestCase {
     func testDetectsSyntheticStarsWithSubpixelAccuracy() throws {
         var rng = SplitMix64(state: 0x5741_524C_4F57_0003)
         let stars = makeStarField(rng: &rng)
-        let buffer = render(stars: stars, dx: 0, dy: 0, rotationDeg: 0,
-                            noiseSigma: 0.02, rng: &rng)
+        let buffer = luminance(render(stars: stars, dx: 0, dy: 0, rotationDeg: 0,
+                                      noiseSigma: 0.02, rng: &rng))
         let detected = CPUStacker.detectStars(in: buffer, width: Self.width, height: Self.height)
         XCTAssertGreaterThanOrEqual(detected.count, 30,
                                     "should recover most of the 40 synthetic stars")
@@ -277,10 +363,12 @@ final class StackerTests: XCTestCase {
         var otherRng = SplitMix64(state: 0xDEAD_BEEF_0000_0005)
         var fieldB: [SynthStar] = []
         while fieldB.count < 40 {
+            let c = Self.tint(otherRng.uniform())
             let candidate = SynthStar(x: otherRng.uniform(25, Double(Self.width - 25)),
                                       y: otherRng.uniform(25, Double(Self.height - 25)),
                                       amp: otherRng.uniform(0.25, 0.55),
-                                      sigma: otherRng.uniform(1.2, 1.8))
+                                      sigma: otherRng.uniform(1.2, 1.8),
+                                      tintR: c.r, tintG: c.g, tintB: c.b)
             let clear = fieldB.allSatisfy { hypot($0.x - candidate.x, $0.y - candidate.y) > 16 }
             if clear { fieldB.append(candidate) }
         }

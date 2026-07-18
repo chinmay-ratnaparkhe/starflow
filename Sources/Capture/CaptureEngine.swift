@@ -531,11 +531,16 @@ public final class CaptureEngine: ObservableObject {
 
     /// Small inline synthetic starfield so the app runs end-to-end in the simulator:
     /// 40 gaussian stars over a noisy pedestal, drifting slowly like a real unguided sky.
+    /// Stars are COLOURED (warm orange giants through blue-white dwarfs, like a real
+    /// field) so the colour stacking pipeline shows colour throughout the app.
     private struct SyntheticStarField {
         static let width = 400
         static let height = 300
 
-        private struct Star { var x: Double; var y: Double; var amp: Double; var sigma: Double }
+        private struct Star {
+            var x: Double; var y: Double; var amp: Double; var sigma: Double
+            var tintR: Double; var tintG: Double; var tintB: Double
+        }
         private var stars: [Star] = []
         private var noiseState: UInt64
 
@@ -551,10 +556,19 @@ public final class CaptureEngine: ObservableObject {
                 return Double(z >> 11) * (1.0 / 9_007_199_254_740_992.0)
             }
             while stars.count < 40 {
+                // Colour-index proxy: 0 = warm (K/M star), 1 = cool blue-white (B/A star).
+                // Tint is luminance-normalised so amp keeps meaning "brightness".
+                let t = nextUniform()
+                var r = 1.0 - 0.45 * t          // 1.00 → 0.55
+                var g = 0.72 + 0.08 * t          // 0.72 → 0.80
+                var b = 0.50 + 0.50 * t          // 0.50 → 1.00
+                let lum = 0.2126 * r + 0.7152 * g + 0.0722 * b
+                r /= lum; g /= lum; b /= lum
                 let candidate = Star(x: 25 + nextUniform() * Double(Self.width - 50),
                                      y: 25 + nextUniform() * Double(Self.height - 50),
                                      amp: 0.25 + nextUniform() * 0.55,
-                                     sigma: 1.2 + nextUniform() * 0.6)
+                                     sigma: 1.2 + nextUniform() * 0.6,
+                                     tintR: r, tintG: g, tintB: b)
                 let clear = stars.allSatisfy {
                     let dx = $0.x - candidate.x, dy = $0.y - candidate.y
                     return dx * dx + dy * dy > 256
@@ -582,9 +596,13 @@ public final class CaptureEngine: ObservableObject {
             // Slow unguided drift, capped so stars stay in frame on long sim runs.
             let dx = min(20.0, 0.35 * Double(index))
             let dy = min(8.0, 0.12 * Double(index))
-            var buffer = [Float](repeating: 0.06, count: w * h)
-            for i in 0..<buffer.count {
-                buffer[i] += Float(0.02 * gaussianNoise())
+            var bufR = [Float](repeating: 0.06, count: w * h)
+            var bufG = [Float](repeating: 0.06, count: w * h)
+            var bufB = [Float](repeating: 0.06, count: w * h)
+            for i in 0..<bufR.count {
+                bufR[i] += Float(0.02 * gaussianNoise())
+                bufG[i] += Float(0.02 * gaussianNoise())
+                bufB[i] += Float(0.02 * gaussianNoise())
             }
             for star in stars {
                 let px = star.x + dx
@@ -598,14 +616,20 @@ public final class CaptureEngine: ObservableObject {
                     for x in x0...x1 {
                         let ddx = Double(x) - px
                         let ddy = Double(y) - py
-                        buffer[y * w + x] += Float(star.amp * exp(-(ddx * ddx + ddy * ddy) * inv))
+                        let psf = star.amp * exp(-(ddx * ddx + ddy * ddy) * inv)
+                        let i = y * w + x
+                        bufR[i] += Float(psf * star.tintR)
+                        bufG[i] += Float(psf * star.tintG)
+                        bufB[i] += Float(psf * star.tintB)
                     }
                 }
             }
-            for i in 0..<buffer.count {
-                buffer[i] = min(1, max(0, buffer[i]))
+            for i in 0..<bufR.count {
+                bufR[i] = min(1, max(0, bufR[i]))
+                bufG[i] = min(1, max(0, bufG[i]))
+                bufB[i] = min(1, max(0, bufB[i]))
             }
-            return CPUStacker.grayImage(from: buffer, width: w, height: h)
+            return CPUStacker.rgbImage(r: bufR, g: bufG, b: bufB, width: w, height: h)
         }
     }
 
