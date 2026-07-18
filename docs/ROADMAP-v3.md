@@ -12,9 +12,9 @@ GOALS: (G1) First clear-night Milky Way image that wows. (G2) Zero-hands session
 | 5 | Plate-solve GoTo: slew→shoot→solve→correct (0.25°) | crown jewel; perfects MW aim | CERTIFIED 2x-green |
 | 6 | Star-color calibration (SPCC-lite) | | CERTIFIED 2x-green |
 | 7 | Offline event calendar + rarity alerts (clean-room data) | | CERTIFIED 2x-green |
-| 8 | Timelapse video export | assembler exists | building |
-| 9 | Landing-report share cards | | building |
-| 10 | Cityscape dual-phase v1 | | |
+| 8 | Timelapse video export | assembler exists | CERTIFIED 2x-green |
+| 9 | Landing-report share cards | | CERTIFIED 2x-green |
+| 10 | Cityscape dual-phase v1 | | building |
 | later | Panorama sequencer; multi-night project stacking | after the basics earn trust | |
 
 RULES: never break tested public APIs; simulator tests stay green; SIMULATED badge honesty; device-only code behind #if; each feature merges only after 2 independent review agents pass it and CI green twice (initial + post-review-fix re-run).
