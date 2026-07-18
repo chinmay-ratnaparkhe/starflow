@@ -21,16 +21,22 @@ public struct ShotModeItem: Identifiable, Sendable {
     public let needsGimbal: Bool
     /// Tonight-gate. Call as `shot.feasibility(sky, quality)`.
     public let feasibility: @Sendable (SkyContext, SkyQuality) -> Feasibility
+    /// How this mode's sub-frames are combined (SessionEngine picks the stacker from
+    /// this). Appended field, defaulted `.registered` so pre-existing call sites keep
+    /// compiling; only trails/timelapse override it.
+    public let stackingStyle: StackingStyle
 
     public init(id: String, name: String, tagline: String, symbol: String,
                 recipe: CaptureRecipe, expectation: String, tutorial: [TutorialStep],
                 checklist: [String] = [],
                 cityViable: Bool, needsGimbal: Bool,
+                stackingStyle: StackingStyle = .registered,
                 feasibility: @escaping @Sendable (SkyContext, SkyQuality) -> Feasibility) {
         self.id = id; self.name = name; self.tagline = tagline; self.symbol = symbol
         self.recipe = recipe; self.expectation = expectation; self.tutorial = tutorial
         self.checklist = checklist
         self.cityViable = cityViable; self.needsGimbal = needsGimbal
+        self.stackingStyle = stackingStyle
         self.feasibility = feasibility
     }
 }
@@ -159,6 +165,7 @@ public enum ShotModeRegistry {
         checklist: ModeChecklists.starTrails,
         cityViable: true,
         needsGimbal: true,
+        stackingStyle: .trails,   // lighten blend — star registration would erase the arcs
         feasibility: { sky, _ in
             if sky.sunAltitudeDeg > -6 {
                 return .notTonight(reason: "Wait for the end of civil twilight — trails need stars, "
@@ -325,6 +332,7 @@ public enum ShotModeRegistry {
         checklist: ModeChecklists.timelapse,
         cityViable: true,
         needsGimbal: true,
+        stackingStyle: .unregistered,   // plain mean — timelapse frames need no star lock
         feasibility: { sky, _ in
             if sky.sunAltitudeDeg > 0 {
                 return .possible(note: "Daylight timelapses work, but stars wheeling over the "

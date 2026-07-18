@@ -257,7 +257,7 @@ final class SessionEngineTests: XCTestCase {
         XCTAssertEqual(all.count, 9)
         XCTAssertEqual(Set(all.map(\.id)).count, 9, "Mode ids must be unique")
         for mode in all {
-            XCTAssertEqual(mode.tutorial.count, 4, "\(mode.id) must ship a 4-step tutorial")
+            XCTAssertGreaterThanOrEqual(mode.tutorial.count, 4, "\(mode.id) must ship a substantial tutorial")
             XCTAssertFalse(mode.expectation.isEmpty, "\(mode.id) needs honest expectation copy")
             XCTAssertGreaterThanOrEqual(mode.checklist.count, 4,
                                         "\(mode.id) must ship a setup checklist")

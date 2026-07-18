@@ -1,6 +1,7 @@
 import SwiftUI
 import Foundation
 import CoreGraphics
+import AVFoundation
 #if canImport(UIKit)
 import UIKit
 #endif
@@ -378,7 +379,95 @@ struct SessionView: View {
                     SFStatChip(symbol: "location.north.line", value: driftStatus(phase: phase), label: "drift")
                     SFStatChip(symbol: "arrow.triangle.2.circlepath", value: "\(stats.flapsRecovered)", label: "flaps")
                 }
+                Divider()
+                    .overlay(Theme.secondaryText(night).opacity(0.2))
+                sourceTruthRows(stats: stats, phase: phase, night: night)
             }
+        }
+    }
+
+    // MARK: - Source truth (camera + stacker)
+
+    /// Compact rows under the telemetry chips stating exactly where frames come from
+    /// and what the stacker is doing with them. Field lesson: indoors, star
+    /// registration rejects every frame (a starless room can't match 5 stars) —
+    /// without these rows a healthy camera looks like a broken app.
+    @ViewBuilder
+    private func sourceTruthRows(stats: SessionStats, phase: SessionPhase, night: Bool) -> some View {
+        let camera = cameraTruth(phase: phase, night: night)
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Circle()
+                    .fill(camera.dot)
+                    .frame(width: 8, height: 8)
+                Text(camera.text)
+                    .font(Theme.caption)
+                    .foregroundStyle(camera.tint)
+                    .fixedSize(horizontal: false, vertical: true)
+                Spacer(minLength: 0)
+            }
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(camera.text)
+
+            HStack(alignment: .top, spacing: 8) {
+                Image(systemName: "square.stack.3d.up")
+                    .font(.system(size: 11, weight: .semibold))
+                    .foregroundStyle(Theme.accent(night))
+                    .padding(.top, 2)
+                    .accessibilityHidden(true)
+                Text(engine.statusDetail)
+                    .font(Theme.caption)
+                    .foregroundStyle(Theme.secondaryText(night))
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("Session status: \(engine.statusDetail)")
+
+            if phase == .capture, stats.subsRejected >= 3, stats.subsRejected > stats.subsAccepted {
+                HStack(alignment: .top, spacing: 8) {
+                    Image(systemName: "exclamationmark.triangle.fill")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(Theme.warning(night))
+                        .padding(.top, 2)
+                        .accessibilityHidden(true)
+                    Text("\(stats.subsRejected) of \(stats.subsAccepted + stats.subsRejected) frames rejected — "
+                         + "alignment needs at least 5 matched stars per frame. Indoors or under thick "
+                         + "cloud every frame is rejected: the camera is working; the view has no stars.")
+                        .font(Theme.caption)
+                        .foregroundStyle(Theme.warning(night))
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+            }
+        }
+    }
+
+    /// One honest line about the capture source. Green dot only when the sensor is
+    /// authorized AND the session is actually in its camera-running window.
+    private func cameraTruth(phase: SessionPhase, night: Bool)
+        -> (dot: Color, text: String, tint: Color) {
+        if engine.captureSourceIsSimulated {
+            return (Theme.rose,
+                    "Camera: simulated — synthetic frames (simulator build)",
+                    Theme.rose)
+        }
+        switch AVCaptureDevice.authorizationStatus(for: .video) {
+        case .authorized:
+            if phase == .capture || phase == .develop {
+                return (Theme.positive(night),
+                        "Camera: live — capturing real sensor frames",
+                        Theme.primaryText(night))
+            }
+            return (Theme.secondaryText(night),
+                    "Camera: authorized — the sensor starts at the Capture phase",
+                    Theme.secondaryText(night))
+        case .notDetermined:
+            return (Theme.warning(night),
+                    "Camera: not asked yet — iOS prompts when Capture begins",
+                    Theme.warning(night))
+        default:
+            return (Theme.danger(night),
+                    "Camera: denied — enable Camera for StarFlow in iOS Settings",
+                    Theme.danger(night))
         }
     }
 

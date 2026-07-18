@@ -1,4 +1,7 @@
 import SwiftUI
+#if canImport(UIKit)
+import UIKit
+#endif
 
 @main
 struct StarFlowApp: App {
@@ -13,15 +16,30 @@ struct StarFlowApp: App {
                 // DockKit accessory-state stream immediately, so the gimbal ribbon,
                 // Settings row, and battery telemetry are live before any session starts.
                 // Idempotent: MountService.start() guards against double-starts.
-                .task { MountService.shared.start() }
+                .task {
+                    MountService.shared.start()
+                    AutoTestRunner.shared.start()
+                    Self.setKeepAwake(true)
+                }
         }
         .onChange(of: scenePhase) { _, phase in
             if phase != .active {
+                Self.setKeepAwake(false)
                 Task { await SessionEngine.shared.handleBackgrounded() }
             } else {
+                // iOS auto-lock suspends the app and kills capture + motor control;
+                // a multi-hour astro session must keep the screen awake (the night
+                // theme keeps the OLED cost low). Re-assert on every foregrounding.
+                Self.setKeepAwake(true)
                 Task { await SessionEngine.shared.handleForegrounded() }
             }
         }
+    }
+
+    private static func setKeepAwake(_ on: Bool) {
+        #if canImport(UIKit) && !os(watchOS)
+        UIApplication.shared.isIdleTimerDisabled = on
+        #endif
     }
 }
 

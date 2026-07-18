@@ -71,6 +71,10 @@ public final class CPUStacker: Stacking {
     /// Kappa for sigma clipping; nil = plain running mean.
     private let kappaSigma: Double?
 
+    /// False = never attempt star registration: every decodable frame joins a plain
+    /// unregistered running mean (timelapse). Fixed at init.
+    private let registrationEnabled: Bool
+
     // MARK: - State
 
     private let lock = NSLock()
@@ -88,8 +92,21 @@ public final class CPUStacker: Stacking {
     public private(set) var lastMatchCount = 0
     public private(set) var lastResidualPx = 0.0
 
-    public init(kappaSigma: Double? = 3.0) {
+    /// True while frames are being star-aligned against the reference. Goes false when
+    /// the stack was seeded by a frame with too few stars (indoor / starless scene →
+    /// unregistered accumulate: plain running mean, no alignment) or when this stacker
+    /// was built with `registration: false`. Proof-of-life flag for the session UI.
+    public private(set) var registrationActive = true
+
+    /// Human-readable reason the most recent `add` returned false; nil after every
+    /// accepted frame. CPUStacker-specific diagnostic — deliberately NOT part of the
+    /// `Stacking` protocol (SessionEngine reads it via a conditional cast).
+    public private(set) var lastRejectionReason: String?
+
+    public init(kappaSigma: Double? = 3.0, registration: Bool = true) {
         self.kappaSigma = kappaSigma
+        self.registrationEnabled = registration
+        self.registrationActive = registration
     }
 
     // MARK: - Stacking conformance
@@ -108,42 +125,71 @@ public final class CPUStacker: Stacking {
         integration = 0
         lastMatchCount = 0
         lastResidualPx = 0
+        registrationActive = registrationEnabled
+        lastRejectionReason = nil
     }
 
-    /// Returns false when the frame is rejected (no stars / misaligned / cloudy).
-    /// Input frames of any resolution are rescaled into the `reset` grid, so a
-    /// reduced-resolution live stack of full-size photos is supported.
+    /// Returns false when the frame is rejected (undecodable / misaligned / cloudy);
+    /// `lastRejectionReason` says why. Input frames of any resolution are rescaled into
+    /// the `reset` grid, so a reduced-resolution live stack of full-size photos is
+    /// supported.
+    ///
+    /// Proof of life: the FIRST decodable frame always seeds the stack, stars or not,
+    /// so the preview shows the real scene immediately. A seed with too few stars flips
+    /// the stack into unregistered accumulate (plain running mean, no alignment,
+    /// `registrationActive == false`) instead of rejecting every subsequent frame.
     public func add(frame: SubFrame) -> Bool {
         lock.lock(); defer { lock.unlock() }
         guard width > 0, height > 0,
               let image = frame.pixelData,
               let gray = Self.grayscaleFloats(from: image, width: width, height: height) else {
             rejectedCount += 1
+            lastRejectionReason = "frame could not be decoded"
             return false
         }
 
-        let stars = Self.detectStars(in: gray, width: width, height: height,
-                                     maxStars: maxStarsPerFrame, sigmaK: detectionSigmaK)
-        guard stars.count >= minStarsPerFrame else {
-            rejectedCount += 1
-            return false
-        }
+        let stars = registrationEnabled
+            ? Self.detectStars(in: gray, width: width, height: height,
+                               maxStars: maxStarsPerFrame, sigmaK: detectionSigmaK)
+            : []
 
         let transform: SimilarityTransform
         if acceptedCount == 0 {
+            // Seed frame: always accepted. Registration stays active only when the
+            // reference actually has enough stars to align against.
             referenceStars = stars
+            registrationActive = registrationEnabled && stars.count >= minStarsPerFrame
+            transform = .identity
+            lastMatchCount = stars.count
+            lastResidualPx = 0
+        } else if !registrationActive {
+            // Unregistered accumulate: no alignment, every decodable frame averages in.
             transform = .identity
             lastMatchCount = stars.count
             lastResidualPx = 0
         } else {
+            guard stars.count >= minStarsPerFrame else {
+                rejectedCount += 1
+                lastRejectionReason = "too few stars"
+                return false
+            }
             guard let reg = Self.register(reference: referenceStars, candidate: stars,
                                           voteStars: voteStarCount,
                                           voteTolerance: voteTolerancePx,
                                           coarseTolerance: coarseMatchTolerancePx,
-                                          fineTolerance: fineMatchTolerancePx),
-                  reg.matches >= minMatches,
-                  reg.residualPx <= maxResidualPx else {
+                                          fineTolerance: fineMatchTolerancePx) else {
                 rejectedCount += 1
+                lastRejectionReason = "no star alignment found"
+                return false
+            }
+            guard reg.matches >= minMatches else {
+                rejectedCount += 1
+                lastRejectionReason = "too few matched stars"
+                return false
+            }
+            guard reg.residualPx <= maxResidualPx else {
+                rejectedCount += 1
+                lastRejectionReason = "alignment residual too high"
                 return false
             }
             transform = reg.transform
@@ -154,6 +200,7 @@ public final class CPUStacker: Stacking {
         accumulate(gray, transform: transform)
         acceptedCount += 1
         integration += max(0, frame.exposureSeconds)
+        lastRejectionReason = nil
         return true
     }
 

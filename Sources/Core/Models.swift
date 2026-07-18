@@ -168,6 +168,19 @@ public protocol Stacking: AnyObject {
     func finalImage() -> CGImage?
 }
 
+/// How a shot mode's sub-frames are combined into one image.
+///  - registered:   star-align every frame against the reference before averaging
+///                  (deep-sky stacks — needs actual stars in frame).
+///  - trails:       lighten (per-pixel max) blend with no alignment — the sky's
+///                  motion IS the shot (star trails).
+///  - unregistered: plain running mean with no alignment (timelapse frames, scenes
+///                  where registration has nothing to lock onto).
+public enum StackingStyle: String, Equatable, Sendable {
+    case registered
+    case trails
+    case unregistered
+}
+
 // MARK: - Shot modes
 
 public enum Feasibility: Equatable, Sendable {

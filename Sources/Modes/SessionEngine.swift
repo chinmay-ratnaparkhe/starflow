@@ -250,15 +250,34 @@ public final class SessionEngine: ObservableObject {
     public static var defaultHooksProvider: () -> SessionHooks = { SessionHooks.live() }
 
     private let mount: MountControlling
-    private let stacker: Stacking
+    /// Explicitly injected stacker (tests/previews). When present it is used for every
+    /// session verbatim; when nil, `start(shot:)` picks a stacker per mode.
+    private let injectedStacker: Stacking?
+    /// The stacker for the current session (mode-aware unless one was injected).
+    private var stacker: Stacking
     private let hooks: SessionHooks
 
     public init(mount: MountControlling? = nil,
                 stacker: Stacking? = nil,
                 hooks: SessionHooks? = nil) {
         self.mount = mount ?? MountService.shared
+        self.injectedStacker = stacker
         self.stacker = stacker ?? CPUStacker()
         self.hooks = hooks ?? SessionEngine.defaultHooksProvider()
+    }
+
+    /// Mode-aware stacker selection: star trails lighten-blend (registration would
+    /// erase the arcs), timelapse plain unregistered mean, everything else the
+    /// registered star stack.
+    static func makeStacker(style: StackingStyle) -> Stacking {
+        switch style {
+        case .registered:
+            return CPUStacker()
+        case .trails:
+            return TrailsBlender()
+        case .unregistered:
+            return CPUStacker(kappaSigma: nil, registration: false)
+        }
     }
 
     // MARK: Private state
@@ -273,6 +292,9 @@ public final class SessionEngine: ObservableObject {
     private var batteryWarned = false
     private var gimbalBatteryWarned = false
     private var rejectionStreak = 0
+    /// Consecutive rejections whose CPUStacker reason was "too few stars" — drives the
+    /// "this mode needs the night sky" guidance without interrupting the session.
+    private var noStarStreak = 0
     private let pollInterval: TimeInterval = 0.25
     private let previewEvery = 10
 
@@ -284,6 +306,11 @@ public final class SessionEngine: ObservableObject {
         guard sessionTask == nil else { return }
         generation += 1
         let gen = generation
+        // Mode-aware stacking: trails lighten-blend / timelapse unregistered mean /
+        // registered star stack. An injected stacker (tests) always wins.
+        if injectedStacker == nil {
+            stacker = SessionEngine.makeStacker(style: shot.stackingStyle)
+        }
         activeShot = shot
         isRunning = true
         interruption = nil
@@ -293,6 +320,7 @@ public final class SessionEngine: ObservableObject {
         batteryWarned = false
         gimbalBatteryWarned = false
         rejectionStreak = 0
+        noStarStreak = 0
         netYawDeg = 0
         thermalBackoffSeconds = 0
         lastNudgeAt = nil
@@ -536,15 +564,28 @@ public final class SessionEngine: ObservableObject {
                 stats.subsAccepted += 1
                 stats.integrationSeconds += frame.exposureSeconds
                 rejectionStreak = 0
+                noStarStreak = 0
                 if stats.subsAccepted % previewEvery == 0 {
                     latestPreview = stacker.currentResult().preview ?? latestPreview
                 }
             } else {
                 stats.subsRejected += 1
                 rejectionStreak += 1
+                // CPUStacker-specific diagnostics (deliberately not on the Stacking
+                // protocol) — read via conditional cast.
+                if (stacker as? CPUStacker)?.lastRejectionReason == "too few stars" {
+                    noStarStreak += 1
+                } else {
+                    noStarStreak = 0
+                }
                 if rejectionStreak == 8 {
                     statusDetail = "Several frames rejected in a row — clouds rolling in, "
                         + "or no stars in frame? Check the sky."
+                }
+                if noStarStreak == 10 {
+                    // Guidance only — the session keeps running (the sky may clear).
+                    statusDetail = "No stars detected — frames are real, but this mode "
+                        + "needs the night sky. Try Star Trails to test indoors."
                 }
             }
             index += 1

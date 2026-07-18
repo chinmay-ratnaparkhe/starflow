@@ -219,6 +219,56 @@ final class StackerTests: XCTestCase {
                           "anchor star centroid should be subpixel-accurate")
     }
 
+    /// FIELD REPORT regression (indoor "broken app"): a starless scene must never look
+    /// dead. The first frame ALWAYS seeds the stack (proof of life), registration goes
+    /// inactive, and subsequent starless frames accumulate unregistered — while a
+    /// starry stack that rejects a starless frame must say WHY ("too few stars").
+    func testStarlessFramesSeedUnregisteredStackAndRejectionsExplain() throws {
+        var rng = SplitMix64(state: 0x1D00_12F0_0000_0006)
+
+        // Starless room: perfectly flat seed (deterministically zero detections),
+        // then noisy starless frames.
+        let stacker = CPUStacker()
+        stacker.reset(width: Self.width, height: Self.height)
+
+        let flat = [Float](repeating: 0.05, count: Self.width * Self.height)
+        XCTAssertTrue(stacker.add(frame: makeFrame(index: 0, image: try makeImage(flat))),
+                      "the first frame must ALWAYS seed the stack, stars or not")
+        XCTAssertFalse(stacker.registrationActive,
+                       "a starless seed must flip the stack to unregistered accumulate")
+        XCTAssertNil(stacker.lastRejectionReason, "accepted frames carry no rejection reason")
+
+        for i in 1...3 {
+            var noise = [Float](repeating: 0, count: Self.width * Self.height)
+            for j in 0..<noise.count {
+                noise[j] = Float(min(1, max(0, 0.05 + 0.02 * rng.gaussian())))
+            }
+            XCTAssertTrue(stacker.add(frame: makeFrame(index: i, image: try makeImage(noise))),
+                          "starless frame \(i) must accumulate unregistered, not be rejected")
+            XCTAssertNil(stacker.lastRejectionReason)
+        }
+        let starless = stacker.currentResult()
+        XCTAssertEqual(starless.accepted, 4)
+        XCTAssertEqual(starless.rejected, 0)
+        XCTAssertNotNil(starless.preview, "proof of life: the preview must exist immediately")
+
+        // Starry stack: a starless frame is still rejected, now with an explanation.
+        let starry = CPUStacker()
+        starry.reset(width: Self.width, height: Self.height)
+        let stars = makeStarField(rng: &rng)
+        let reference = render(stars: stars, dx: 0, dy: 0, rotationDeg: 0,
+                               noiseSigma: 0.02, rng: &rng)
+        XCTAssertTrue(starry.add(frame: makeFrame(index: 0, image: try makeImage(reference))))
+        XCTAssertTrue(starry.registrationActive,
+                      "a starry seed must keep registration active")
+        XCTAssertFalse(starry.add(frame: makeFrame(index: 1, image: try makeImage(flat))),
+                       "a starless frame against a starry reference is still rejected")
+        XCTAssertEqual(starry.lastRejectionReason, "too few stars",
+                       "the rejection must carry the reason the session UI explains")
+        XCTAssertEqual(starry.currentResult().accepted, 1)
+        XCTAssertEqual(starry.currentResult().rejected, 1)
+    }
+
     /// A frame with too few matched stars (a completely different field) is rejected.
     func testRejectsUnmatchableField() throws {
         var rng = SplitMix64(state: 0x5741_524C_4F57_0004)
