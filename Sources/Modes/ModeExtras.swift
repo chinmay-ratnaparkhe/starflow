@@ -67,10 +67,10 @@ enum ModeChecklists {
     static let cityscape: [String] = [
         steady,
         lensWipe,
-        "On station for blue hour — the base stack starts 10–20 minutes after "
-        + "sunset and won't wait for you.",
-        "Skyline composed with sky to spare — both stacks must share exactly the "
-        + "same framing for the blend.",
+        "Clean horizon line composed — lit city below, open sky above; clutter "
+        + "across the boundary is what confuses the v1 mask.",
+        "Committed to holding still — both phases share one framing, and the "
+        + "composite falls apart if the rig moves between them.",
     ]
 
     static let aurora: [String] = [

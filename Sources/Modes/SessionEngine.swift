@@ -355,6 +355,16 @@ public final class SessionEngine: ObservableObject {
     /// `Documents/Timelapses/`. Nil for non-timelapse modes, when nothing was
     /// retained, or when assembly failed (the failure is narrated, never fatal).
     @Published public private(set) var timelapseVideoURL: URL?
+    /// Cityscape dual-phase (feature 10): which capture phase is live —
+    /// `.foreground` while the bracket + base frames are banked, `.sky` for
+    /// the registered sky stack. Nil for every other mode. Drives the
+    /// session screen's Foreground/Sky phase chips.
+    @Published public private(set) var cityscapePhase: CityscapePhase?
+    /// Cityscape dual-phase composite outcome, set by the Develop phase from
+    /// a REAL `CityscapeComposer` run only. Low mask confidence keeps the
+    /// stacks separate (composite nil, reason stated) — never a bad blend
+    /// published silently.
+    @Published public private(set) var cityscapeOutcome: CityscapeComposer.Outcome?
 
     // MARK: Published telemetry mirrors
 
@@ -486,6 +496,14 @@ public final class SessionEngine: ObservableObject {
     /// Accepted stacked frames before the accumulators are measured — a
     /// near-empty mean would make the aperture photometry noise-dominated.
     static let colorCalMinFrames = 5
+    /// Cityscape dual-phase foreground frames (feature 10), banked by Phase A
+    /// and kept in memory for the Develop-phase composite. Small count by
+    /// design (3-frame bracket + 6 base frames), and every frame is stored as
+    /// a `CityscapeComposer.retentionCopy` (longest side ≤ 1024 px) so nine
+    /// full sensor frames can never pin hundreds of MB.
+    private var cityscapeBaseFrames: [CGImage] = []
+    private var cityscapeUnderExposed: CGImage?
+    private var cityscapeOverExposed: CGImage?
     /// Timelapse frame retention (feature 8): per-sub frames land here as
     /// bounded, downscaled JPEGs when the shot produces a timelapse. Nil for
     /// every other mode. Consumed (and nilled) by the Develop-phase assembly.
@@ -540,6 +558,11 @@ public final class SessionEngine: ObservableObject {
         nudgesAtLastDriftCheck = 0
         colorCalSolve = nil
         colorCalEvaluated = false
+        cityscapePhase = nil
+        cityscapeOutcome = nil
+        cityscapeBaseFrames = []
+        cityscapeUnderExposed = nil
+        cityscapeOverExposed = nil
         timelapseStore?.clear()
         timelapseStore = shot.producesTimelapse ? TimelapseFrameStore() : nil
         timelapseVideoURL = nil
@@ -571,7 +594,13 @@ public final class SessionEngine: ObservableObject {
         generation += 1
         sessionTask?.cancel()
         sessionTask = nil
-        let hadData = stats.subsAccepted > 0
+        // Cityscape foreground frames banked by Phase A count as data too: a
+        // user who stopped after the bracket still deserves the fused city.
+        // The gate must match composeCityscapeIfNeeded's notion of data — the
+        // −2 EV / +1 EV bracket frames alone are still compose-able when the
+        // base-frame decodes failed.
+        let hadData = stats.subsAccepted > 0 || !cityscapeBaseFrames.isEmpty
+            || cityscapeUnderExposed != nil || cityscapeOverExposed != nil
         interruption = nil
         awaitingResume = false
         backgroundPaused = false
@@ -594,6 +623,22 @@ public final class SessionEngine: ObservableObject {
                 Task { [weak self] in await self?.assembleTimelapse(from: store) }
             } else {
                 discardTimelapseFrames()
+            }
+            // Cityscape dual-phase (feature 10): a user-stopped session still
+            // deserves its composite — run it right after this instant abort
+            // returns, generation-guarded like the timelapse assembly so a
+            // session started mid-compose can never receive another
+            // session's blend.
+            if activeShot?.capturesForeground == true {
+                let gen = generation
+                Task { [weak self] in
+                    guard let self, gen == self.generation else { return }
+                    // Same sky source as developPhase: fall back to the live
+                    // preview so a user-stopped sky phase still contributes
+                    // whatever the stacker can already show.
+                    self.composeCityscapeIfNeeded(
+                        sky: self.stacker.finalImage() ?? self.stacker.currentResult().preview)
+                }
             }
         } else {
             discardTimelapseFrames()
@@ -850,6 +895,18 @@ public final class SessionEngine: ObservableObject {
         captureDims = dims
         stacker.reset(width: dims.width, height: dims.height)
 
+        // Cityscape dual-phase (feature 10), Phase A FIRST: park the head and
+        // bank the static foreground — a 3-frame exposure bracket plus 6
+        // identical base frames, held in memory for the Develop-phase
+        // composite. Phase B is the unchanged registered sky stack below
+        // (focus sweep, cloud gate, and all narration inherited).
+        if shot.capturesForeground {
+            try await captureForegroundPhase(recipe: recipe)
+            try Task.checkCancellation()
+            cityscapePhase = .sky
+            statusDetail = "Foreground banked — now the sky stack. Don't touch the rig."
+        }
+
         // Plate-solve GoTo stage (feature 5): the camera is live now, so the
         // compass-coarse aim from the Aim phase can be upgraded to solver
         // precision (≤ 0.5°). It runs here — not in the Aim phase — because a
@@ -1012,6 +1069,53 @@ public final class SessionEngine: ObservableObject {
             let gap = recipe.intervalSeconds + thermalBackoffSeconds
             if gap > 0, index < recipe.targetSubCount {
                 try await waitGap(gap, shot: shot)
+            }
+        }
+    }
+
+    // MARK: Cityscape foreground phase (feature 10, Phase A)
+
+    /// Bank the static foreground while the head is parked: the 3-frame
+    /// exposure bracket (base / −2 EV via shorter shutter / +1 EV via ISO —
+    /// the 1 s cap bounds exposure from above, see
+    /// `CityscapeComposer.bracketRecipes`), then 6 identical base frames for
+    /// the robust mean. Every frame goes through the EXISTING capture hooks
+    /// with a per-frame recipe override and is retained downscaled in memory.
+    /// Frames use probe index 0 (like the focus sweep and GoTo solves) so the
+    /// sky phase's capture plan is untouched. A frame that can't be decoded
+    /// degrades the fusion, never the session; guardians and the background
+    /// pause stay live between frames.
+    private func captureForegroundPhase(recipe: CaptureRecipe) async throws {
+        cityscapePhase = .foreground
+        statusDetail = "Foreground first — hold still…"
+        // Park the head for the whole phase: both phases must share one
+        // framing, and an idle-motor twitch would smear the bracket.
+        await mount.stopEverything()
+        let bracket = CityscapeComposer.bracketRecipes(
+            baseExposureSeconds: recipe.exposureSeconds)
+        for (slot, subRecipe) in bracket.enumerated() {
+            try await waitWhileSuspended()
+            try runGuardians()
+            statusDetail = "Foreground bracket — exposure \(slot + 1) of \(bracket.count). "
+                + "Hold still…"
+            let frame = try await hooks.captureSub(subRecipe, 0)
+            guard let image = frame.pixelData,
+                  let retained = CityscapeComposer.retentionCopy(image) else { continue }
+            switch slot {
+            case 0: cityscapeBaseFrames.append(retained)
+            case 1: cityscapeUnderExposed = retained
+            default: cityscapeOverExposed = retained
+            }
+        }
+        let baseTarget = CityscapeComposer.baseFrameCount
+        for n in 1...baseTarget {
+            try await waitWhileSuspended()
+            try runGuardians()
+            statusDetail = "Foreground base frames — \(n) of \(baseTarget). Hold still…"
+            let frame = try await hooks.captureSub(bracket[0], 0)
+            if let image = frame.pixelData,
+               let retained = CityscapeComposer.retentionCopy(image) {
+                cityscapeBaseFrames.append(retained)
             }
         }
     }
@@ -1424,16 +1528,45 @@ public final class SessionEngine: ObservableObject {
         phase = .develop
         statusDetail = "Developing — stacking \(stats.subsAccepted) frames…"
         await hooks.endCapture()
-        if let final = stacker.finalImage() {
-            latestPreview = oriented(final)
-        } else if let preview = stacker.currentResult().preview {
-            latestPreview = oriented(preview)
-        }
+        let skyFinal = stacker.finalImage() ?? stacker.currentResult().preview
+        if let skyFinal { latestPreview = oriented(skyFinal) }
+        // Cityscape dual-phase composite (feature 10): runs after the sky
+        // stack is final and before .complete, so the landing report sees
+        // the finished blend (or the honest fallback).
+        composeCityscapeIfNeeded(sky: skyFinal)
         // Timelapse assembly (feature 8): encode the retained frames into the
         // .mp4 AFTER the camera is torn down (no encode/capture contention) and
         // BEFORE the phase flips to .complete, so the landing report and the
         // logbook record both see the finished clip.
         await assembleTimelapseIfNeeded()
+    }
+
+    // MARK: Cityscape composite (feature 10, Develop)
+
+    /// Compose the Phase A foreground with the Phase B sky stack via the pure
+    /// `CityscapeComposer`. Every input is rotated upright FIRST — the
+    /// measured `stats.captureTilt` is the composer's gravity prior, so
+    /// "bright city below / dark sky above" is anchored to real gravity, not
+    /// the sensor's mounting orientation. Low mask confidence (or a missing
+    /// sky stack) publishes NO composite: the preview falls back to the fused
+    /// foreground and the reason is narrated — never a bad blend silently.
+    private func composeCityscapeIfNeeded(sky: CGImage?) {
+        guard activeShot?.capturesForeground == true else { return }
+        guard !cityscapeBaseFrames.isEmpty || cityscapeUnderExposed != nil
+                || cityscapeOverExposed != nil else { return }
+        statusDetail = "Compositing city and sky…"
+        let outcome = CityscapeComposer.compose(
+            baseFrames: cityscapeBaseFrames.compactMap { oriented($0) },
+            underExposed: oriented(cityscapeUnderExposed),
+            overExposed: oriented(cityscapeOverExposed),
+            sky: oriented(sky))
+        cityscapeOutcome = outcome
+        if let composite = outcome.composite {
+            latestPreview = composite          // inputs were oriented — already upright
+        } else if let foreground = outcome.foreground {
+            latestPreview = foreground         // honest foreground-only fallback
+        }
+        statusDetail = outcome.reason
     }
 
     // MARK: Timelapse retention + assembly (feature 8)
@@ -1728,6 +1861,19 @@ public final class SessionEngine: ObservableObject {
             line += " · \(stats.subsSkippedClouds) cloud frames waited out"
         }
         if timelapseVideoURL != nil { line += " · timelapse clip saved" }
+        if let outcome = cityscapeOutcome {
+            // Three honest cases: a blend happened; the mask wasn't trusted;
+            // or the mask was fine but there was nothing to blend (no sky
+            // stack / no decodable foreground). Naming the right one matters —
+            // "kept separate (high confidence)" would read as a contradiction.
+            if outcome.composite != nil {
+                line += " · city+sky composite blended"
+            } else if outcome.confidence == .low {
+                line += " · stacks kept separate — no confident horizon"
+            } else {
+                line += " · no composite — see the report for why"
+            }
+        }
         return line
     }
 }

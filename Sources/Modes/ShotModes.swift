@@ -34,6 +34,13 @@ public struct ShotModeItem: Identifiable, Sendable {
     /// frame cap, storage pre-flight). Appended field, defaulted `false` so
     /// pre-existing call sites keep compiling; only Night Timelapse sets it.
     public let producesTimelapse: Bool
+    /// True for the cityscape dual-phase mode (feature 10): the session banks
+    /// a bracketed static foreground FIRST (head parked), then runs this
+    /// mode's recipe as the registered sky stack, and Develop composites the
+    /// two along a computed horizon mask (`CityscapeComposer`). Appended
+    /// field, defaulted `false` so pre-existing call sites keep compiling;
+    /// only City Nights sets it.
+    public let capturesForeground: Bool
 
     public init(id: String, name: String, tagline: String, symbol: String,
                 recipe: CaptureRecipe, expectation: String, tutorial: [TutorialStep],
@@ -42,6 +49,7 @@ public struct ShotModeItem: Identifiable, Sendable {
                 stackingStyle: StackingStyle = .registered,
                 celestialTarget: CelestialTarget? = nil,
                 producesTimelapse: Bool = false,
+                capturesForeground: Bool = false,
                 feasibility: @escaping @Sendable (SkyContext, SkyQuality) -> Feasibility) {
         self.id = id; self.name = name; self.tagline = tagline; self.symbol = symbol
         self.recipe = recipe; self.expectation = expectation; self.tutorial = tutorial
@@ -50,6 +58,7 @@ public struct ShotModeItem: Identifiable, Sendable {
         self.stackingStyle = stackingStyle
         self.celestialTarget = celestialTarget
         self.producesTimelapse = producesTimelapse
+        self.capturesForeground = capturesForeground
         self.feasibility = feasibility
     }
 }
@@ -366,46 +375,59 @@ public enum ShotModeRegistry {
         name: "City Nights",
         tagline: "Skyline stacks above the glow",
         symbol: "building.2.fill",
-        recipe: CaptureRecipe(exposureSeconds: 1.0, iso: 100, targetSubCount: 120, nudgeTracking: false),
-        expectation: "A two-phase shot: a blue-hour base while the sky still holds color, then a "
-            + "stack of the lit-up skyline once windows glow. Expect clean, low-noise city lights — "
-            + "not a sky full of stars. Note: v1 saves both stacks to your library; the final "
-            + "day-night blend is still a manual step in your photo editor.",
+        // The SKY phase recipe (Phase B): 1 s subs with real gain so stars
+        // survive city glow. Phase A brackets the city separately at low ISO
+        // (see CityscapeComposer.bracketRecipes).
+        recipe: CaptureRecipe(exposureSeconds: 1.0, iso: 1600, targetSubCount: 120, nudgeTracking: false),
+        expectation: "One session, two phases: first a bracketed pass banks the lit-up city — "
+            + "three exposures so bright signs keep their detail — then 120 one-second subs at "
+            + "ISO 1600 go deep on the sky above the skyline. StarFlow blends the two along a "
+            + "horizon mask computed from brightness and texture: city lights stay bright, sky "
+            + "goes deep. v1 works best with a clean horizon line — when the mask isn't "
+            + "confident, you get both stacks separately instead of a bad blend. City glow "
+            + "still sets the ceiling: expect the brighter stars, not a Milky Way.",
         tutorial: [
             TutorialStep(id: 1, title: "What you're going for",
-                body: "A two-phase skyline: a blue-hour base while the sky still holds color, "
-                    + "then a clean stack of the lit-up city once the windows glow. Expect "
-                    + "rich, low-noise lights — not a sky full of stars.",
+                body: "City lights that stay bright under a sky with real stars in it — "
+                    + "one frame, two exposures' worth of truth. Under city glow that means "
+                    + "the brighter stars, not a Milky Way. The blend follows a horizon "
+                    + "line computed from brightness and texture, so a clean skyline is the "
+                    + "whole game in v1.",
                 symbol: "photo"),
-            TutorialStep(id: 2, title: "Be on station for blue hour",
-                body: "Phase one starts 10–20 minutes after sunset and won't wait for you. "
-                    + "Compose with sky to spare, then don't touch the rig — both phases must "
-                    + "share exactly the same framing for the blend to work.",
-                symbol: "sun.horizon"),
+            TutorialStep(id: 2, title: "Compose a clean horizon",
+                body: "Frame with the lit city below and open sky above. The mask reads the "
+                    + "boundary from where brightness and detail fall away — cranes, trees, "
+                    + "and rooftop clutter across the line confuse it, so keep the skyline "
+                    + "crisp and don't touch the rig once you start.",
+                symbol: "building.2"),
             TutorialStep(id: 3, title: "Capture in two acts",
-                body: "The blue-hour stack banks clean, noise-free shadow detail you can't "
-                    + "recover once the sky goes black. When windows and streetlights take "
-                    + "over, the second stack shoots 1-second subs at ISO 100 so bright signs "
-                    + "don't clip.",
+                body: "Phase one takes about ten seconds: three bracketed exposures — a base, "
+                    + "one two stops darker for the bright signs, one a stop brighter for the "
+                    + "shadows — plus six matching frames to average the noise down. Phase two "
+                    + "then stacks 1-second subs at ISO 1600 for the sky, same framing.",
                 symbol: "circle.lefthalf.filled"),
             TutorialStep(id: 4, title: "What the app does",
-                body: "It aligns and averages each phase into its own low-noise stack and "
-                    + "saves both to your library. v1 stops there: the final day-night blend "
-                    + "is a manual step in your editor (auto-blend is on the roadmap).",
+                body: "It averages the base frames robustly (a passing headlight gets dropped, "
+                    + "not blended), fuses the bracket so nothing clips, finds the horizon "
+                    + "from the image itself, and feathers the sky stack in above it. If the "
+                    + "horizon isn't confident, it hands you both stacks separately and says "
+                    + "why — never a bad blend silently.",
                 symbol: "wand.and.stars"),
             TutorialStep(id: 5, title: "Pro tip",
-                body: "Blend like the pros: blue-hour frame for sky and shadows, night stack "
-                    + "for the lights, one soft mask between them. Any rock-steady support "
-                    + "works — the gimbal is simply a convenient tripod here.",
+                body: "The darker your vantage, the deeper the sky phase digs — a rooftop "
+                    + "away from streetlights beats a bright sidewalk. Check the mask "
+                    + "confidence on the landing report before sharing: high means the "
+                    + "blend followed a clean line.",
                 symbol: "lightbulb"),
         ],
         checklist: ModeChecklists.cityscape,
         cityViable: true,
         needsGimbal: false,
+        capturesForeground: true,   // dual-phase: bracketed foreground, then the sky stack
         feasibility: { sky, _ in
-            if sky.sunAltitudeDeg > 0 {
-                return .possible(note: "Come back at blue hour — starting about 15 minutes after "
-                    + "sunset — for the balanced sky the blend needs.")
+            if sky.sunAltitudeDeg > -6 {
+                return .possible(note: "Come back once twilight fades — the sky phase needs "
+                    + "stars above the skyline, and the city needs its lights on.")
             }
             return .great
         })

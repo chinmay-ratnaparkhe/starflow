@@ -122,6 +122,7 @@ struct SessionView: View {
                                   simulated: engine.captureSourceIsSimulated,
                                   record: loggedRecord,
                                   timelapseURL: engine.timelapseVideoURL,
+                                  cityscape: engine.cityscapeOutcome,
                                   night: night, onNewSession: { dismiss() })
                         .transition(.asymmetric(
                             insertion: .scale(scale: 0.94).combined(with: .opacity),
@@ -134,6 +135,10 @@ struct SessionView: View {
                         }
                         if phase == .aim, let target = shot.celestialTarget {
                             aimAssistCard(target: target, night: night)
+                                .transition(.move(edge: .top).combined(with: .opacity))
+                        }
+                        if let cityPhase = engine.cityscapePhase {
+                            cityscapePhaseCard(live: cityPhase, night: night)
                                 .transition(.move(edge: .top).combined(with: .opacity))
                         }
                         heroCard(stats: stats, phase: phase, night: night)
@@ -371,6 +376,64 @@ struct SessionView: View {
             }
         }
         .preferredColorScheme(.dark)
+    }
+
+    // MARK: - Cityscape dual-phase chips (feature 10)
+
+    /// Foreground/Sky phase chips for cityscape sessions, driven purely by the
+    /// engine's `cityscapePhase` (nil for every other mode). Foreground always
+    /// runs first, so once the sky phase is live the foreground chip shows its
+    /// check — the card also carries a one-line honest description of what the
+    /// current phase is doing.
+    private func cityscapePhaseCard(live: CityscapePhase, night: Bool) -> some View {
+        SFCard {
+            VStack(alignment: .leading, spacing: 10) {
+                SFSectionLabel("Dual-phase capture")
+                HStack(spacing: 8) {
+                    cityscapePhaseChip(.foreground, live: live, night: night)
+                    cityscapePhaseChip(.sky, live: live, night: night)
+                    Spacer(minLength: 0)
+                }
+                Text(live == .foreground
+                     ? "Banking the city bracket — hold still, the sky stack comes next."
+                     : "Foreground banked — now stacking the sky above your skyline.")
+                    .font(Theme.caption)
+                    .foregroundStyle(Theme.secondaryText(night))
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
+    private func cityscapePhaseChip(_ chip: CityscapePhase, live: CityscapePhase,
+                                    night: Bool) -> some View {
+        let isLive = chip == live
+        // Foreground runs first: once the sky phase is live, foreground is done.
+        let isDone = chip == .foreground && live == .sky
+        let tint = isLive ? Theme.accent(night)
+            : (isDone ? Theme.positive(night) : Theme.secondaryText(night))
+        return HStack(spacing: 5) {
+            Image(systemName: chip == .foreground ? "building.2.fill" : "sparkles")
+                .font(.system(size: 10, weight: .semibold))
+            Text(chip.rawValue.uppercased())
+                .font(Theme.label)
+                .kerning(1.1)
+            if isDone {
+                Image(systemName: "checkmark")
+                    .font(.system(size: 9, weight: .bold))
+            }
+        }
+        .foregroundStyle(tint)
+        .padding(.horizontal, 10)
+        .padding(.vertical, 5)
+        .background(
+            Capsule()
+                .fill(tint.opacity(isLive ? 0.16 : 0.08))
+                .overlay(Capsule().strokeBorder(tint.opacity(isLive ? 0.8 : 0.35),
+                                                lineWidth: 1))
+        )
+        .accessibilityElement(children: .ignore)
+        .accessibilityLabel("\(chip.rawValue) phase "
+                            + (isLive ? "in progress" : (isDone ? "complete" : "up next")))
     }
 
     // MARK: - Header
@@ -984,6 +1047,10 @@ private struct LandingReport: View {
     let record: SessionRecord?
     /// The assembled timelapse clip (feature 8), when this session made one.
     let timelapseURL: URL?
+    /// Cityscape dual-phase outcome (feature 10), when this session banked a
+    /// foreground. Carries the mask confidence, the honest reason line, and —
+    /// when the composite was withheld — the two stacks separately.
+    let cityscape: CityscapeComposer.Outcome?
     let night: Bool
     let onNewSession: () -> Void
 
@@ -1083,6 +1150,10 @@ private struct LandingReport: View {
                 }
             }
 
+            if let cityscape {
+                cityscapeCard(outcome: cityscape)
+            }
+
             if let timelapseURL {
                 timelapseCard(url: timelapseURL)
             } else if shot.producesTimelapse {
@@ -1119,6 +1190,131 @@ private struct LandingReport: View {
             if let timelapseURL {
                 VideoPlayerSheet(url: timelapseURL, title: shot.name)
             }
+        }
+    }
+
+    // MARK: Cityscape dual-phase report (feature 10)
+
+    /// Mask-confidence line for cityscape sessions, plus the honest deliverable
+    /// when the composite was withheld (low confidence or a missing sky stack):
+    /// the fused foreground and the sky stack SEPARATELY, each shareable — the
+    /// composer's reason line says why, never a bad blend silently. A medium-
+    /// confidence composite ALSO offers the stacks: "check the boundary" is
+    /// only honest advice if there's a way out when the boundary looks wrong.
+    private func cityscapeCard(outcome: CityscapeComposer.Outcome) -> some View {
+        // No composite is always a warning state, whatever the mask read —
+        // a green triangle over "no blend" would be a contradictory signal.
+        let tint = outcome.composite == nil
+            ? Theme.warning(night) : confidenceTint(outcome.confidence)
+        return SFCard(accent: outcome.composite == nil ? tint : nil) {
+            VStack(alignment: .leading, spacing: 12) {
+                SFSectionLabel("City + sky")
+                HStack(spacing: 8) {
+                    Image(systemName: outcome.composite != nil
+                          ? "checkmark.circle.fill" : "exclamationmark.triangle.fill")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(tint)
+                    Text("Horizon mask confidence: \(outcome.confidence.rawValue)")
+                        .font(Theme.headline)
+                        .foregroundStyle(Theme.primaryText(night))
+                }
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel("Horizon mask confidence \(outcome.confidence.rawValue)")
+                if !outcome.reason.isEmpty {
+                    Text(outcome.reason)
+                        .font(Theme.caption)
+                        .foregroundStyle(Theme.secondaryText(night))
+                        .fixedSize(horizontal: false, vertical: true)
+                }
+                if outcome.composite == nil {
+                    // No composite — hand over both stacks separately.
+                    cityscapeHalves(outcome: outcome)
+                } else {
+                    if let mask = outcome.maskPreview {
+                        // Transparency: the computed mask the blend actually followed.
+                        VStack(alignment: .leading, spacing: 6) {
+                            Image(decorative: mask, scale: 1)
+                                .resizable()
+                                .scaledToFit()
+                                .frame(height: 80)
+                                .frame(maxWidth: .infinity)
+                                .background(Color.black)
+                                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                                .colorMultiply(night ? Theme.nightRed : .white)
+                            Text("The computed horizon mask the blend followed — bright "
+                                 + "is sky, dark is your city.")
+                                .font(Theme.caption)
+                                .foregroundStyle(Theme.secondaryText(night))
+                                .fixedSize(horizontal: false, vertical: true)
+                        }
+                    }
+                    if outcome.confidence == .medium {
+                        // Medium confidence means "check the boundary" — so give
+                        // the way out: the two stacks, separately, right here.
+                        VStack(alignment: .leading, spacing: 8) {
+                            Text("If the boundary looks off, skip the blend — here are "
+                                 + "the two stacks on their own.")
+                                .font(Theme.caption)
+                                .foregroundStyle(Theme.secondaryText(night))
+                                .fixedSize(horizontal: false, vertical: true)
+                            cityscapeHalves(outcome: outcome)
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    /// The two stacks side by side, each shareable — the no-composite
+    /// deliverable, and the escape hatch under a medium-confidence blend.
+    private func cityscapeHalves(outcome: CityscapeComposer.Outcome) -> some View {
+        HStack(alignment: .top, spacing: 10) {
+            if let foreground = outcome.foreground {
+                cityscapeHalf(image: foreground, label: "Foreground")
+            }
+            if let skyImage = outcome.skyImage {
+                cityscapeHalf(image: skyImage, label: "Sky stack")
+            }
+        }
+    }
+
+    /// One labelled, shareable stack (foreground or sky) for `cityscapeHalves`.
+    private func cityscapeHalf(image: CGImage, label: String) -> some View {
+        let shareImage = Image(decorative: image, scale: 1)
+        return VStack(alignment: .leading, spacing: 6) {
+            Text(label)
+                .font(Theme.label)
+                .kerning(1.1)
+                .foregroundStyle(Theme.secondaryText(night))
+            shareImage
+                .resizable()
+                .scaledToFit()
+                .frame(height: 120)
+                .frame(maxWidth: .infinity)
+                .background(Color.black)
+                .clipShape(RoundedRectangle(cornerRadius: 8, style: .continuous))
+                .colorMultiply(night ? Theme.nightRed : .white)
+                .overlay(alignment: .topTrailing) {
+                    if simulated { SimulatedBadge().padding(4) }
+                }
+            ShareLink(item: shareImage,
+                      preview: SharePreview("StarFlow — \(shot.name) \(label.lowercased())",
+                                            image: shareImage)) {
+                Label("Share", systemImage: "square.and.arrow.up")
+                    .font(Theme.caption)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 8)
+            }
+            .foregroundStyle(Theme.accent(night))
+            .background(Capsule().strokeBorder(Theme.accent(night).opacity(0.5), lineWidth: 1))
+            .accessibilityLabel("Share the \(label.lowercased()) image")
+        }
+    }
+
+    private func confidenceTint(_ confidence: CityscapeComposer.Confidence) -> Color {
+        switch confidence {
+        case .high: return Theme.positive(night)
+        case .medium, .low: return Theme.warning(night)
         }
     }
 
