@@ -242,6 +242,50 @@ private struct SplitMix64: RandomNumberGenerator {
     }
 }
 
+// MARK: - CloudTimeBudget (pure math, unit-tested)
+
+/// The honest accounting for cloud pauses: frames the cloud gate skips must NOT
+/// consume the shot's planned sub count — they extend the session instead, so a
+/// "600-sub Milky Way stack" still delivers 600 stacked subs after a cloud bank.
+/// The extension is capped at `extensionFactor` × the plan's wall time so a sky
+/// that never clears can never trap a session forever. No actor, no clocks —
+/// tests script the numbers directly.
+public enum CloudTimeBudget {
+
+    /// A session may run up to this multiple of its planned wall time before
+    /// cloud-skipped frames start consuming the plan again.
+    public static let extensionFactor: Double = 2.0
+
+    /// Wall-clock seconds the capture plan expects: every sub plus its cadence gap.
+    public static func plannedWallSeconds(recipe: CaptureRecipe) -> Double {
+        Double(max(0, recipe.targetSubCount))
+            * (max(0, recipe.exposureSeconds) + max(0, recipe.intervalSeconds))
+    }
+
+    /// True while a cloud-skipped frame may still extend the session.
+    public static func allowsExtension(plannedSeconds: Double,
+                                       elapsedSeconds: Double) -> Bool {
+        elapsedSeconds < plannedSeconds * extensionFactor
+    }
+
+    /// Steady-state status line while frames are being skipped under clouds.
+    /// Honest about the cost: how much session time the wait has added, and —
+    /// once the budget is spent — that the session will wrap up rather than
+    /// keep waiting (which can mean fewer subs than planned; the landing
+    /// report counts them).
+    public static func waitLine(skippedFrames: Int, frameSeconds: Double,
+                                extending: Bool) -> String {
+        guard extending else {
+            return "Clouds have used the extra session time — wrapping up rather than waiting longer."
+        }
+        let added = Double(max(0, skippedFrames)) * max(0, frameSeconds)
+        let time = added < 60
+            ? "\(Int(added.rounded())) s"
+            : "\(Int((added / 60).rounded())) min"
+        return "Waiting out clouds — \(time) added, the stack is safe."
+    }
+}
+
 // MARK: - SessionEngine
 
 /// The flight computer. Walks a shot through
@@ -291,10 +335,14 @@ public final class SessionEngine: ObservableObject {
     @Published public private(set) var thermal: ProcessInfo.ThermalState = .nominal
     @Published public private(set) var phoneBatteryPercent: Int?
 
-    /// 0…1 across the capture plan.
+    /// 0…1 across the capture plan. Counts plan slots actually consumed:
+    /// accepted + rejected + the slots clouds ate after the extension budget
+    /// was spent (`subsLostToClouds`). Cloud skips inside the budget extend
+    /// the session instead of consuming the plan, so they don't move this.
     public var progress: Double {
         guard let target = activeShot?.recipe.targetSubCount, target > 0 else { return 0 }
-        return min(1, Double(stats.subsAccepted + stats.subsRejected) / Double(target))
+        let consumed = stats.subsAccepted + stats.subsRejected + stats.subsLostToClouds
+        return min(1, Double(consumed) / Double(target))
     }
 
     /// True when this session's frames come from a synthetic capture source
@@ -376,6 +424,14 @@ public final class SessionEngine: ObservableObject {
     private var noStarStreak = 0
     /// Per-session sky-condition classifier (rebuilt on every `start`).
     private var skyMonitor = SkyConditionMonitor()
+    /// Measured sky-background samples (0…1) from this session's frames —
+    /// feeds the one-shot mid-session exposure refinement.
+    private var backgroundSamples: [Double] = []
+    /// The single mid-session ISO adjustment has been evaluated (applied or
+    /// declined) — "one adjustment mid-session max" lives here.
+    private var exposureRefineEvaluated = false
+    /// Number of measured frames before the exposure refinement is evaluated.
+    static let refineAfterSamples = 5
     /// Stack grid dimensions from `prepareCapture` — the grid frame measurement
     /// runs on when the stacker can't provide an observation itself.
     private var captureDims = (width: 0, height: 0)
@@ -407,6 +463,8 @@ public final class SessionEngine: ObservableObject {
         noStarStreak = 0
         skyMonitor = SkyConditionMonitor()
         skyCondition = .unknown
+        backgroundSamples = []
+        exposureRefineEvaluated = false
         focusSweepStatus = .inactive
         focusSharpness = nil
         focusSharpnessMean = nil
@@ -650,7 +708,10 @@ public final class SessionEngine: ObservableObject {
 
     private func capturePhase(shot: ShotModeItem) async throws {
         phase = .capture
-        let recipe = shot.recipe
+        // Mutable copy: the one-shot mid-session exposure refinement may adjust
+        // ISO after the first measured frames (never the shutter, never the plan
+        // shape — sub count, tracking, and cadence are the mode's contract).
+        var recipe = shot.recipe
 
         // Storage pre-flight: refuse a plan the disk can't hold BEFORE the first frame
         // (StorageBudget owns the math; hooks.estimatedBytesPerFrame is the seam).
@@ -705,7 +766,16 @@ public final class SessionEngine: ObservableObject {
         // counter takes over from the second frame anyway.
         if case .inactive = focusSweepStatus { statusDetail = "Capturing…" }
 
+        // Cloud-time budget: cloud-skipped frames extend the session instead of
+        // consuming the plan, capped at 2× the planned wall time (see
+        // CloudTimeBudget). `index` counts PLAN slots; `attempt` counts every
+        // shutter actuation, skipped or not.
+        let plannedWallSeconds = CloudTimeBudget.plannedWallSeconds(recipe: recipe)
+        let captureStartedAt = hooks.now()
+        var cloudExtensionActive = true
+
         var index = 0
+        var attempt = 0
         while index < recipe.targetSubCount {
             try Task.checkCancellation()
             syncMirrors()
@@ -719,7 +789,8 @@ public final class SessionEngine: ObservableObject {
                 }
             }
 
-            let frame = try await hooks.captureSub(recipe, index)
+            let frame = try await hooks.captureSub(recipe, attempt)
+            attempt += 1
             syncFocusTelemetry()
             // Cloud gate (defaulted engine setting): while the measured sky is
             // cloudy in a registered-stack session, keep capturing but skip the
@@ -730,9 +801,21 @@ public final class SessionEngine: ObservableObject {
             let skippedForClouds = cloudGateActive && skyCondition == .cloudy
             var skyAdvicePosted = false
             if skippedForClouds {
+                // `feedRefine: false`: a cloud-lit background is real but
+                // unrepresentative of the sky the stack exposes under — it must
+                // not steer the one-shot ISO refinement that outlives the clouds.
                 skyAdvicePosted = observeSky(frame: frame, cpuStacker: nil,
-                                             gated: cloudGateActive)
-                stats.subsRejected += 1
+                                             gated: cloudGateActive, feedRefine: false)
+                stats.subsSkippedClouds += 1
+                // A skipped frame must not consume the plan — extend the
+                // session instead, until clouds have doubled its wall time.
+                let elapsed = hooks.now().timeIntervalSince(captureStartedAt)
+                cloudExtensionActive = CloudTimeBudget.allowsExtension(
+                    plannedSeconds: plannedWallSeconds, elapsedSeconds: elapsed)
+                if !cloudExtensionActive {
+                    index += 1   // budget spent: clouds now count down the plan
+                    stats.subsLostToClouds += 1
+                }
             } else {
                 let accepted = stacker.add(frame: frame)
                 skyAdvicePosted = observeSky(frame: frame, cpuStacker: stacker as? CPUStacker,
@@ -767,8 +850,16 @@ public final class SessionEngine: ObservableObject {
                             + "needs the night sky. Try Star Trails to test indoors."
                     }
                 }
+                index += 1
             }
-            index += 1
+            // One-shot exposure refinement: once the first few frames have
+            // MEASURED the sky background, trade gain in whichever direction
+            // the histogram says (see ExposurePlanner.refine). Narrated once.
+            var refineNarrated = false
+            if !skippedForClouds {
+                refineNarrated = refineExposureIfReady(recipe: &recipe,
+                                                       style: shot.stackingStyle)
+            }
             if skippedForClouds && !skyAdvicePosted {
                 // Steady-state cloud pause: re-post the honest waiting line every
                 // frame. Without this, any status written mid-pause (resume flow,
@@ -777,8 +868,12 @@ public final class SessionEngine: ObservableObject {
                 // skipped — matching how the sub counter refreshes each frame on
                 // the normal path. The transition frame itself is excluded so the
                 // "Clouds rolling in" advice still holds for at least one frame.
-                statusDetail = "Cloudy — the stack is safe, waiting for a gap…"
-            } else if (cloudGateActive && skyCondition == .cloudy) || skyAdvicePosted {
+                statusDetail = CloudTimeBudget.waitLine(
+                    skippedFrames: stats.subsSkippedClouds,
+                    frameSeconds: recipe.exposureSeconds + recipe.intervalSeconds,
+                    extending: cloudExtensionActive)
+            } else if (cloudGateActive && skyCondition == .cloudy) || skyAdvicePosted
+                        || refineNarrated {
                 // Hold the sky advice on screen for at least one frame instead
                 // of overwriting it with the sub counter immediately.
             } else if rejectionStreak < 8 {
@@ -884,6 +979,32 @@ public final class SessionEngine: ObservableObject {
         }
     }
 
+    // MARK: Mid-session exposure refinement (measured sky background)
+
+    /// One-shot ISO refinement from the MEASURED sky background: after the
+    /// first few observed frames, take the median background and let
+    /// `ExposurePlanner.refine` decide — too near saturation drops a stop, a
+    /// darker-than-planned sky raises one, anything healthy stands. Evaluated
+    /// at most once per session (applied or declined), registered-stack
+    /// sessions only (a mid-run gain step would print a visible seam into a
+    /// trails blend). Returns true when the adjustment was applied + narrated.
+    private func refineExposureIfReady(recipe: inout CaptureRecipe,
+                                       style: StackingStyle) -> Bool {
+        guard !exposureRefineEvaluated,
+              style == .registered,
+              backgroundSamples.count >= SessionEngine.refineAfterSamples else { return false }
+        exposureRefineEvaluated = true
+        let sorted = backgroundSamples.sorted()
+        let median = sorted[sorted.count / 2]
+        let current = ExposurePlanner.Plan(exposureSeconds: recipe.exposureSeconds,
+                                           iso: recipe.iso, note: "")
+        guard let tuned = ExposurePlanner.refine(measuredBackground: median,
+                                                 current: current) else { return false }
+        recipe.iso = tuned.iso
+        statusDetail = tuned.note
+        return true
+    }
+
     /// Mirror the focus telemetry seam into the published chip values
     /// (only writing on change, like the mount mirrors).
     private func syncFocusTelemetry() {
@@ -901,9 +1022,12 @@ public final class SessionEngine: ObservableObject {
     /// by-products of stacking); falls back to measuring the frame directly on
     /// the same stack grid when the stacker can't provide one (trails blends,
     /// frames skipped during a cloud pause). Returns true when a transition
-    /// advice line was posted to `statusDetail`.
+    /// advice line was posted to `statusDetail`. `feedRefine` is false for
+    /// frames the cloud gate skipped: their measured background is clouds, not
+    /// sky, and must not contaminate the one-shot exposure refinement's median.
     @discardableResult
-    private func observeSky(frame: SubFrame, cpuStacker: CPUStacker?, gated: Bool) -> Bool {
+    private func observeSky(frame: SubFrame, cpuStacker: CPUStacker?, gated: Bool,
+                            feedRefine: Bool = true) -> Bool {
         let observation: SkyObservation?
         if let fromStacker = cpuStacker?.lastSkyObservation,
            fromStacker.timestamp == frame.timestamp {
@@ -917,6 +1041,8 @@ public final class SessionEngine: ObservableObject {
             observation = nil
         }
         guard let observation else { return false }
+        // Every measured NON-cloud-skipped frame feeds the refinement.
+        if feedRefine { backgroundSamples.append(observation.backgroundLevel) }
         let previous = skyCondition
         let updated = skyMonitor.ingest(observation)
         guard updated != previous else { return false }
@@ -1173,6 +1299,9 @@ public final class SessionEngine: ObservableObject {
         var line = "\(stats.subsAccepted) frames · \(minutes)m \(seconds)s integrated"
         if stats.nudges > 0 { line += " · \(stats.nudges) nudges" }
         if stats.flapsRecovered > 0 { line += " · \(stats.flapsRecovered) reconnects" }
+        if stats.subsSkippedClouds > 0 {
+            line += " · \(stats.subsSkippedClouds) cloud frames waited out"
+        }
         return line
     }
 }

@@ -355,6 +355,16 @@ private struct LogbookDetailSheet: View {
                                label: "flaps recovered")
                     SFStatChip(symbol: "camera.aperture", value: acceptanceRate, label: "kept")
                 }
+                if let cloudWaits = record.subsSkippedClouds, cloudWaits > 0 {
+                    HStack(spacing: 8) {
+                        SFStatChip(symbol: "cloud.fill", value: "\(cloudWaits)",
+                                   label: "cloud waits", tint: Theme.warning(night))
+                        if let lost = record.subsLostToClouds, lost > 0 {
+                            SFStatChip(symbol: "cloud.rain.fill", value: "\(lost)",
+                                       label: "subs lost to clouds", tint: Theme.warning(night))
+                        }
+                    }
+                }
             }
         }
     }

@@ -77,6 +77,43 @@ public enum ExposurePlanner {
                              intervalSeconds: base.intervalSeconds)
     }
 
+    // MARK: Mid-session refinement (MEASURED sky background)
+
+    /// Measured sky background (0…1, sigma-clipped mean from `SkyConditionMonitor`
+    /// observations) at/above which the plan trades one stop of gain away.
+    /// Deliberately below the monitor's 0.30 "overexposed" verdict so tuning
+    /// happens while the session is still worth saving.
+    public static let refineBackgroundHigh: Double = 0.20
+    /// Measured background at/below which the sky is darker than any plan
+    /// assumed and one stop of extra gain buys real depth.
+    public static let refineBackgroundLow: Double = 0.02
+
+    /// One mid-session ISO adjustment from the MEASURED sky background — the sky
+    /// as the sensor actually sees it, not the user's Bortle guess. Pure and
+    /// deterministic; the session engine enforces "at most once per session".
+    ///
+    /// Returns nil when the plan should stand: background in the healthy band,
+    /// a target-lit recipe (its subject provides the photons), or an adjustment
+    /// the ISO clamps would cancel anyway. Never touches the shutter — 1 s is
+    /// the hard cap and "more light" still means more subs, never longer frames.
+    public static func refine(measuredBackground: Double, current: Plan) -> Plan? {
+        guard current.iso > brightTargetISOThreshold else { return nil }
+        let iso: Double
+        let reason: String
+        if measuredBackground >= refineBackgroundHigh {
+            iso = max(current.iso / 2, isoFloor)
+            reason = "background near saturation"
+        } else if measuredBackground <= refineBackgroundLow {
+            iso = min(current.iso * 2, isoCeiling)
+            reason = "sky darker than planned"
+        } else {
+            return nil
+        }
+        guard iso != current.iso else { return nil }
+        return Plan(exposureSeconds: current.exposureSeconds, iso: iso,
+                    note: "Sky measured — \(reason), tuning to ISO \(Int(iso)).")
+    }
+
     private static func isoScale(for quality: SkyQuality) -> Double {
         switch quality {
         case .city: return 0.25

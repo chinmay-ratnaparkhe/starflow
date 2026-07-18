@@ -30,6 +30,11 @@ private final class SkyMockStacker: Stacking {
     func finalImage() -> CGImage? { nil }
 }
 
+private final class SkyValueBox<T> {
+    var value: T
+    init(_ value: T) { self.value = value }
+}
+
 private struct SkyTestTimeout: Error {}
 
 // MARK: - Tests
@@ -223,8 +228,9 @@ final class SkyConditionTests: XCTestCase {
 
     /// Registered-stack session under a scripted sky: 6 starry frames, 6 flat
     /// cloudy frames, then stars again. The engine must classify cloudy after
-    /// the hysteresis dwell, skip the accumulate while cloudy (frames counted
-    /// as rejected, stacker untouched), notice the gap, and resume stacking.
+    /// the hysteresis dwell, skip the accumulate while cloudy — and, per the
+    /// cloud-time budget, those skipped frames must NOT consume the planned
+    /// sub count: the session extends and still delivers every planned sub.
     @MainActor
     func testEngineSkipsAccumulateWhileCloudyThenResumes() async throws {
         let (engine, stacker) = makeEngine(stackingStyle: .registered, targetSubs: 24)
@@ -232,16 +238,78 @@ final class SkyConditionTests: XCTestCase {
         try await waitUntil("phase == .complete") { engine.phase == .complete }
         try await waitUntil("engine idle") { !engine.isRunning }
 
-        // Frames 0–8 accumulate (condition flips to .cloudy after frame 8's
-        // observation); frames 9–14 are skipped while cloudy (clear votes on
-        // 12–14 satisfy the dwell); frames 15–23 accumulate again.
-        XCTAssertEqual(stacker.added, 18, "Cloudy frames must not reach the stacker")
-        XCTAssertEqual(engine.stats.subsAccepted, 18)
-        XCTAssertEqual(engine.stats.subsRejected, 6,
-                       "Skipped frames are honestly counted as rejected")
+        // Capture attempts 0–8 accumulate (condition flips to .cloudy after
+        // attempt 8's observation); attempts 9–14 are skipped while cloudy
+        // (clear votes on 12–14 satisfy the dwell); the session then extends
+        // past the cloud bank and stacks the full 24-sub plan.
+        XCTAssertEqual(stacker.added, 24, "Cloudy frames must not reach the stacker, "
+                       + "and the plan must still fill completely")
+        XCTAssertEqual(engine.stats.subsAccepted, 24,
+                       "Waiting out clouds must not shrink the delivered stack")
+        XCTAssertEqual(engine.stats.subsRejected, 0,
+                       "Cloud-skipped frames are not rejections")
+        XCTAssertEqual(engine.stats.subsSkippedClouds, 6,
+                       "Skipped frames are tracked in their own honest counter")
         XCTAssertEqual(engine.skyCondition, .clear,
                        "The monitor must notice the sky clearing during the pause")
         XCTAssertEqual(engine.stats.skyCondition, .clear)
+    }
+
+    /// Same scripted layout but the sky never clears — and a scripted clock
+    /// makes the capture run overshoot twice its planned wall time. Once the
+    /// cloud-time budget is spent, skipped frames must count down the plan so
+    /// a permanently cloudy sky can never trap the session forever.
+    @MainActor
+    func testCloudExtensionIsCappedAtTwiceThePlannedWallTime() async throws {
+        let side = SessionHooks.syntheticSize
+        let recipe = CaptureRecipe(exposureSeconds: 1.0, iso: 800,
+                                   targetSubCount: 12, nudgeTracking: false)
+        let starImage = SessionHooks.syntheticFrame(recipe: recipe, index: 0).pixelData
+        let cloudImage = Self.flatGrayImage(side: side, gray: 0.12)
+        // Scripted clock: every now() call advances 5 s, so "elapsed wall time"
+        // races past the 24 s cap (12 subs × 1 s × factor 2) within a few frames.
+        let clock = SkyValueBox(Date(timeIntervalSinceReferenceDate: 0))
+        let hooks = SessionHooks(
+            prepareCapture: { _ in (side, side) },
+            captureSub: { recipe, index in
+                try await Task.sleep(nanoseconds: 2_000_000)
+                return SubFrame(index: index, timestamp: Date(),
+                                exposureSeconds: recipe.exposureSeconds, iso: recipe.iso,
+                                pixelData: index >= 5 ? cloudImage : starImage)
+            },
+            endCapture: {},
+            thermalState: { .nominal },
+            batteryPercent: { 80 },
+            freeDiskBytes: { 64_000_000_000 },
+            nudgeVector: { (deltaPitchDeg: 0, deltaYawDeg: 0.5) },
+            now: {
+                clock.value = clock.value.addingTimeInterval(5)
+                return clock.value
+            },
+            sleep: { _ in try await Task.sleep(nanoseconds: 200_000) })
+
+        let stacker = SkyMockStacker()
+        let engine = SessionEngine(mount: SkyMockMount(), stacker: stacker, hooks: hooks)
+        engine.autoFocusSweep = false   // isolate the capture loop's budget math
+        let shot = ShotModeItem(
+            id: "cloudcap", name: "Cloud Cap", tagline: "test", symbol: "star",
+            recipe: recipe, expectation: "test", tutorial: [], cityViable: true,
+            needsGimbal: false, stackingStyle: .registered,
+            feasibility: { _, _ in .great })
+        engine.start(shot: shot)
+
+        try await waitUntil("phase == .complete") { engine.phase == .complete }
+        try await waitUntil("engine idle") { !engine.isRunning }
+
+        // Attempts 0–4 starry, 5+ solid cloud (votes flip the condition after
+        // attempt 7): 8 frames reach the stacker, everything after is skipped —
+        // and because the scripted clock exhausts the budget, those skips
+        // consume the remaining plan instead of extending forever.
+        XCTAssertEqual(engine.stats.subsAccepted, 8)
+        XCTAssertEqual(engine.stats.subsRejected, 0)
+        XCTAssertGreaterThanOrEqual(engine.stats.subsSkippedClouds, 4,
+                                    "The tail of the plan was spent waiting on clouds")
+        XCTAssertEqual(stacker.added, 8, "No cloudy frame may reach the stacker")
     }
 
     /// Same scripted sky, trails style: clouds are part of the shot — every

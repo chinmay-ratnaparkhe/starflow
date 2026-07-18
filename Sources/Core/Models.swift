@@ -291,5 +291,18 @@ public struct SessionStats: Sendable {
     /// `.unknown` when the monitor never saw enough starry frames to grade.
     /// Appended field with a default so the empty init keeps its meaning.
     public var skyCondition: SkyCondition = .unknown
+    /// Frames captured but deliberately NOT stacked while the measured sky was
+    /// cloudy (registered-stack cloud gate). Tracked apart from `subsRejected`
+    /// so waiting out clouds never consumes the shot's planned sub count —
+    /// the session extends instead (capped by `CloudTimeBudget`).
+    /// Appended field with a default so the empty init keeps its meaning.
+    public var subsSkippedClouds: Int = 0
+    /// Of `subsSkippedClouds`, the plan slots clouds consumed for good AFTER
+    /// the `CloudTimeBudget` extension was spent. Keeps
+    /// `subsAccepted + subsRejected + subsLostToClouds` equal to the plan
+    /// slots consumed, so progress math and the logbook's ended-early verdict
+    /// stay exact. Appended field with a default so the empty init keeps its
+    /// meaning.
+    public var subsLostToClouds: Int = 0
     public init() {}
 }

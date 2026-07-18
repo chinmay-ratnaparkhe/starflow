@@ -28,12 +28,23 @@ public struct SessionRecord: Codable, Identifiable, Equatable, Sendable {
     /// Optional: nil for records from before this field, and for sessions where
     /// the monitor never had enough starry frames to grade the sky.
     public var skyCondition: SkyCondition?
+    /// Frames captured but deliberately not stacked while the measured sky was
+    /// cloudy (registered-stack cloud gate; see `CloudTimeBudget`).
+    /// Optional: records from before this field decode as nil.
+    public var subsSkippedClouds: Int?
+    /// Of `subsSkippedClouds`, the plan slots clouds consumed for good after
+    /// the cloud-time extension budget was spent. Keeps `endedEarly` exact:
+    /// a session whose tail clouds ate on schedule is not a diverted flight.
+    /// Optional: records from before this field decode as nil.
+    public var subsLostToClouds: Int?
 
     public init(id: UUID, date: Date, shotID: String, shotName: String,
                 integrationSeconds: Double, subsAccepted: Int, subsRejected: Int,
                 nudges: Int, flapsRecovered: Int, targetSubCount: Int,
                 captureTilt: DeviceTilt? = nil,
-                skyCondition: SkyCondition? = nil) {
+                skyCondition: SkyCondition? = nil,
+                subsSkippedClouds: Int? = nil,
+                subsLostToClouds: Int? = nil) {
         self.id = id; self.date = date; self.shotID = shotID; self.shotName = shotName
         self.integrationSeconds = integrationSeconds
         self.subsAccepted = subsAccepted; self.subsRejected = subsRejected
@@ -41,12 +52,16 @@ public struct SessionRecord: Codable, Identifiable, Equatable, Sendable {
         self.targetSubCount = targetSubCount
         self.captureTilt = captureTilt
         self.skyCondition = skyCondition
+        self.subsSkippedClouds = subsSkippedClouds
+        self.subsLostToClouds = subsLostToClouds
     }
 
     /// True when the session stopped before reaching its planned sub count
     /// (guardian stop, user stop, battery floor — the diverted-flight case).
+    /// Plan slots clouds consumed after the extension budget was spent count
+    /// as consumed — that session finished its (shortened) plan on schedule.
     public var endedEarly: Bool {
-        subsAccepted + subsRejected < targetSubCount
+        subsAccepted + subsRejected + (subsLostToClouds ?? 0) < targetSubCount
     }
 }
 

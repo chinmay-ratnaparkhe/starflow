@@ -19,6 +19,7 @@ struct SessionView: View {
     @State private var abortOnExit = false
     @State private var loggedSession = false
     @State private var showGimbalSchool = false
+    @StateObject private var framing = FramingGuidanceModel()
 
     init(shot: ShotModeItem) {
         self.shot = shot
@@ -38,8 +39,12 @@ struct SessionView: View {
             UIDevice.current.isBatteryMonitoringEnabled = true
             #endif
             SessionEngine.shared.start(shot: shot)
+            if SessionEngine.shared.phase == .aim, let target = shot.celestialTarget {
+                framing.start(target: target)
+            }
         }
         .onDisappear {
+            framing.stop()
             // Only abort if the user explicitly chose to leave mid-session.
             if abortOnExit {
                 SessionEngine.shared.abort()
@@ -52,6 +57,12 @@ struct SessionView: View {
         .onChange(of: engine.phase) { oldPhase, newPhase in
             guard oldPhase != newPhase else { return }
             phaseFeedback(for: newPhase)
+            // Framing guidance lives in the Aim phase only.
+            if newPhase == .aim, let target = shot.celestialTarget {
+                framing.start(target: target)
+            } else {
+                framing.stop()
+            }
             if newPhase == .complete {
                 logSessionIfNeeded()
             }
@@ -109,7 +120,7 @@ struct SessionView: View {
                             aimAssistCard(target: target, night: night)
                                 .transition(.move(edge: .top).combined(with: .opacity))
                         }
-                        heroCard(stats: stats, night: night)
+                        heroCard(stats: stats, phase: phase, night: night)
                         previewCard(phase: phase, stats: stats, preview: engine.latestPreview, night: night)
                         telemetryCard(stats: stats, phase: phase, night: night)
 
@@ -162,7 +173,9 @@ struct SessionView: View {
             captureTilt: stats.captureTilt,
             // .unknown means "never had enough starry frames to grade" — store
             // nothing rather than a hollow verdict.
-            skyCondition: stats.skyCondition == .unknown ? nil : stats.skyCondition)
+            skyCondition: stats.skyCondition == .unknown ? nil : stats.skyCondition,
+            subsSkippedClouds: stats.subsSkippedClouds,
+            subsLostToClouds: stats.subsLostToClouds)
         // latestPreview is already rotated upright by the engine's develop phase,
         // so the logbook thumbnail and share sheet inherit the correct orientation.
         SessionStore.shared.save(record, thumbnail: engine.latestPreview)
@@ -196,12 +209,49 @@ struct SessionView: View {
                     .fixedSize(horizontal: false, vertical: true)
                     .contentTransition(.opacity)
                     .animation(.easeInOut(duration: 0.25), value: engine.statusDetail)
+                framingGuidanceRows(night: night)
                 Text("Compass-coarse aim: ±10° — fine-tune by hand if needed.")
                     .font(Theme.caption)
                     .foregroundStyle(Theme.secondaryText(night))
                     .fixedSize(horizontal: false, vertical: true)
             }
             .accessibilityElement(children: .combine)
+        }
+    }
+
+    /// Live "where's the core?" readout inside the Aim Assist card: an arrow
+    /// pointing the way plus the offset in degrees ("Core: 12° left"), computed
+    /// by the pure `FramingGuide` from the compass attitude and the
+    /// SkyEngine-resolved target. Degrades honestly: no motion hardware or no
+    /// location fix shows a one-line reason instead of a fake arrow.
+    @ViewBuilder
+    private func framingGuidanceRows(night: Bool) -> some View {
+        if let reading = framing.reading {
+            HStack(spacing: 10) {
+                Group {
+                    if let angle = FramingGuide.arrowAngleDeg(offset: reading.offset) {
+                        Image(systemName: "arrow.up.circle.fill")
+                            .rotationEffect(.degrees(angle))
+                    } else {
+                        Image(systemName: "checkmark.circle.fill")
+                    }
+                }
+                .font(.system(size: 22, weight: .semibold))
+                .foregroundStyle(Theme.accent(night))
+                .animation(.easeInOut(duration: 0.3), value: reading.offset)
+                Text(reading.line)
+                    .font(Theme.liveValue(15))
+                    .foregroundStyle(Theme.primaryText(night))
+                    .contentTransition(.opacity)
+                Spacer(minLength: 0)
+            }
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("Framing guidance: \(reading.line)")
+        } else if let reason = framing.unavailableReason {
+            Text(reason)
+                .font(Theme.caption)
+                .foregroundStyle(Theme.secondaryText(night))
+                .fixedSize(horizontal: false, vertical: true)
         }
     }
 
@@ -314,7 +364,7 @@ struct SessionView: View {
 
     // MARK: - Hero: integration counter
 
-    private func heroCard(stats: SessionStats, night: Bool) -> some View {
+    private func heroCard(stats: SessionStats, phase: SessionPhase, night: Bool) -> some View {
         let target = max(shot.recipe.targetSubCount, 1)
         let progress = min(1.0, Double(stats.subsAccepted) / Double(target))
         return SFCard {
@@ -335,12 +385,35 @@ struct SessionView: View {
                 ProgressView(value: progress)
                     .tint(Theme.accent(night))
                     .accessibilityLabel("Capture progress")
+                // Live depth meter: qualitative tier for the growing stack,
+                // honest per the MEASURED sky (pure IntegrationDepth math).
+                // Milky Way sessions only — the tier copy ("faint arms
+                // emerging") and the 5/15/30-min thresholds are calibrated to
+                // a 1 s / ISO 3200 Milky Way stack. It would be false copy on
+                // a Moon or ISS stack and meaningless for trails/timelapse.
+                if phase == .capture, shot.stackingStyle == .registered,
+                   shot.celestialTarget == .milkyWayCore,
+                   stats.subsAccepted > 0 {
+                    Text(IntegrationDepth.line(integratedSeconds: stats.integrationSeconds,
+                                               condition: engine.skyCondition))
+                        .font(Theme.caption)
+                        .foregroundStyle(Theme.secondaryText(night))
+                        .fixedSize(horizontal: false, vertical: true)
+                        .contentTransition(.opacity)
+                        .accessibilityLabel(
+                            IntegrationDepth.line(integratedSeconds: stats.integrationSeconds,
+                                                  condition: engine.skyCondition))
+                }
                 HStack(spacing: 8) {
                     SFStatChip(symbol: "checkmark.circle", value: "\(stats.subsAccepted)",
                                label: "accepted", tint: Theme.positive(night))
                     SFStatChip(symbol: "xmark.circle", value: "\(stats.subsRejected)",
                                label: "rejected",
                                tint: stats.subsRejected > 0 ? Theme.warning(night) : nil)
+                    if stats.subsSkippedClouds > 0 {
+                        SFStatChip(symbol: "cloud.fill", value: "\(stats.subsSkippedClouds)",
+                                   label: "cloud waits", tint: Theme.warning(night))
+                    }
                     SFStatChip(symbol: "square.stack.3d.up", value: "\(shot.recipe.targetSubCount)",
                                label: "target")
                 }
@@ -888,6 +961,10 @@ private struct LandingReport: View {
                                    label: "subs stacked", tint: Theme.positive(night))
                         SFStatChip(symbol: "xmark.circle", value: "\(stats.subsRejected)",
                                    label: "rejected")
+                        if stats.subsSkippedClouds > 0 {
+                            SFStatChip(symbol: "cloud.fill", value: "\(stats.subsSkippedClouds)",
+                                       label: "cloud waits")
+                        }
                     }
                     HStack(spacing: 8) {
                         SFStatChip(symbol: "scope", value: "\(stats.nudges)", label: "nudges")
@@ -946,6 +1023,98 @@ private struct LandingReport: View {
             .foregroundStyle(Theme.accent(night))
             .background(Capsule().strokeBorder(Theme.accent(night).opacity(0.5), lineWidth: 1))
             .accessibilityHint("Closes this report and returns to the shot list.")
+        }
+    }
+}
+
+// MARK: - Framing guidance (Aim phase)
+
+/// Live "where is the target relative to my frame?" feed for the Aim phase.
+/// Polls the compass/attitude with the same `AimAssist` sensing path the
+/// auto-aim slew uses, resolves the target with the same SkyEngine math, and
+/// publishes a pure `FramingGuide` offset for the card to render.
+///
+/// Degrades gracefully and HONESTLY: no motion hardware (simulator), no
+/// location fix, or a compass that never settles all surface as a one-line
+/// reason instead of a fake arrow.
+@MainActor
+final class FramingGuidanceModel: ObservableObject {
+
+    struct Reading: Equatable {
+        var offset: FramingGuide.Offset
+        var line: String
+    }
+
+    @Published private(set) var reading: Reading?
+    @Published private(set) var unavailableReason: String?
+
+    private var pollTask: Task<Void, Never>?
+    private let assist = AimAssist()
+
+    /// Begin polling (idempotent). Call when the Aim phase starts.
+    func start(target: CelestialTarget) {
+        guard pollTask == nil else { return }
+        pollTask = Task { [weak self] in
+            while !Task.isCancelled {
+                guard let self else { return }
+                guard let location = AppLocation.shared.current else {
+                    self.reading = nil
+                    self.unavailableReason =
+                        "Waiting for a location fix to place \(target.displayName)."
+                    try? await Task.sleep(nanoseconds: 1_000_000_000)
+                    continue
+                }
+                do {
+                    let attitude = try await self.assist.readAttitude(timeout: 2.0)
+                    // stop() may have run while the read was in flight — a late
+                    // publish would resurrect a reading stop() just cleared.
+                    guard !Task.isCancelled else { return }
+                    let coord = self.assist.resolve(target: target, location: location,
+                                                    date: Date())
+                    let offset = FramingGuide.offset(cameraAzimuthDeg: attitude.azimuthDeg,
+                                                     cameraAltitudeDeg: attitude.altitudeDeg,
+                                                     target: coord)
+                    self.reading = Reading(
+                        offset: offset,
+                        line: FramingGuide.guidanceLine(offset: offset,
+                                                        targetName: Self.shortName(for: target)))
+                    self.unavailableReason = nil
+                } catch AimAssistError.motionUnavailable {
+                    // No motion hardware here (simulator / unsupported device) —
+                    // it will not appear mid-session, so stop polling entirely.
+                    guard !Task.isCancelled else { return }
+                    self.reading = nil
+                    self.unavailableReason =
+                        "No motion sensors here — frame \(target.displayName) by eye."
+                    return
+                } catch is CancellationError {
+                    return
+                } catch {
+                    guard !Task.isCancelled else { return }
+                    self.reading = nil
+                    self.unavailableReason =
+                        "Compass unsettled — guidance resumes when it stabilizes."
+                }
+                try? await Task.sleep(nanoseconds: 700_000_000)
+            }
+        }
+    }
+
+    /// Stop polling and release the motion sensors (idempotent).
+    func stop() {
+        pollTask?.cancel()
+        pollTask = nil
+        assist.stopMotionUpdates()
+        reading = nil
+        unavailableReason = nil
+    }
+
+    /// Short readout name ("Core: 12° left"), distinct from the sentence-form
+    /// `displayName` ("the Milky Way") used in status prose.
+    private static func shortName(for target: CelestialTarget) -> String {
+        switch target {
+        case .milkyWayCore: return "Core"
+        case .moon: return "Moon"
         }
     }
 }
