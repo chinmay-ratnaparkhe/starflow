@@ -11,9 +11,9 @@ GOALS: (G1) First clear-night Milky Way image that wows. (G2) Zero-hands session
 | 4 | Plate-solve core: triangle-hash matcher + bright-star DB, tele-crop first | MATH via deep-research | CERTIFIED 2x-green |
 | 5 | Plate-solve GoTo: slew→shoot→solve→correct (0.25°) | crown jewel; perfects MW aim | CERTIFIED 2x-green |
 | 6 | Star-color calibration (SPCC-lite) | | CERTIFIED 2x-green |
-| 7 | Offline event calendar + rarity alerts (clean-room data) | | building |
-| 8 | Timelapse video export | assembler exists | |
-| 9 | Landing-report share cards | | |
+| 7 | Offline event calendar + rarity alerts (clean-room data) | | CERTIFIED 2x-green |
+| 8 | Timelapse video export | assembler exists | building |
+| 9 | Landing-report share cards | | building |
 | 10 | Cityscape dual-phase v1 | | |
 | later | Panorama sequencer; multi-night project stacking | after the basics earn trust | |
 
