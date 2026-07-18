@@ -40,8 +40,10 @@ import simd
 // least-squares fit x = A·ξ − B·η + tx, y = B·ξ + A·η + ty is exact for it and
 // roll recovers as atan2(−B, −A).
 //
-// Nothing here touches sessions yet — feature 5 (GoTo) wires the loop. The only
-// runtime consumer today is the AutoTest `solve_preview` debug action.
+// Consumers: `GoToController` (feature 5) closes the aiming loop with this —
+// SessionEngine solves live frames to refine aim, re-acquire after flap
+// recovery, and cross-check drift — and the AutoTest `solve_preview` debug
+// action solves the latest stack preview on demand.
 
 /// One embedded catalog star, J2000.
 public struct BrightStar: Sendable {

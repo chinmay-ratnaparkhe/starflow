@@ -968,6 +968,14 @@ private struct LandingReport: View {
                     }
                     HStack(spacing: 8) {
                         SFStatChip(symbol: "scope", value: "\(stats.nudges)", label: "nudges")
+                        // Plate-solve drift corrections (feature 5) — shown only
+                        // when one actually fired, mirroring the engine's
+                        // completion summary so the report never undercounts
+                        // what the narration already claimed.
+                        if stats.driftCorrections > 0 {
+                            SFStatChip(symbol: "location.north.line",
+                                       value: "\(stats.driftCorrections)", label: "drift fixes")
+                        }
                         SFStatChip(symbol: "arrow.triangle.2.circlepath", value: "\(stats.flapsRecovered)",
                                    label: "flaps recovered")
                     }

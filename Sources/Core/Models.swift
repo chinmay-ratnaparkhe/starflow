@@ -304,5 +304,9 @@ public struct SessionStats: Sendable {
     /// stay exact. Appended field with a default so the empty init keeps its
     /// meaning.
     public var subsLostToClouds: Int = 0
+    /// Corrective impulses fired by mid-session plate-solve drift cross-checks
+    /// (feature 5 GoTo). Appended field with a default so the empty init keeps
+    /// its meaning.
+    public var driftCorrections: Int = 0
     public init() {}
 }

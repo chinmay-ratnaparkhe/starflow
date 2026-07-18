@@ -67,6 +67,30 @@ public struct SessionHooks {
     }
     public var focusTelemetry: @MainActor () -> (sharpness: Double?, mean: Double?, drifting: Bool)
         = { (nil, nil, false) }
+    /// Plate-solve GoTo seams (feature 5), declared with defaults so the
+    /// memberwise init keeps its signature:
+    ///  - `detectStarField` extracts star centroids (brightest-first) from one
+    ///    captured frame at native resolution — the CPUStacker detection path.
+    ///    Nil when the frame can't be decoded (treated as zero stars).
+    ///  - `solveStarField` plate-solves a detected field against the embedded
+    ///    bright-star catalog given a rough horizontal FOV (deg). Simulator
+    ///    tests inject synthetic solvable fields / scripted solutions here;
+    ///    device builds run the real solver — no device-camera path exists
+    ///    outside the capture seams above.
+    public var detectStarField: @MainActor (SubFrame) -> GoToController.StarField? = { frame in
+        guard let image = frame.pixelData else { return nil }
+        let width = image.width, height = image.height
+        guard let gray = CPUStacker.grayscaleFloats(from: image, width: width, height: height)
+        else { return nil }
+        let stars = CPUStacker.detectStars(in: gray, width: width, height: height)
+        return GoToController.StarField(centroids: stars.map { CGPoint(x: $0.x, y: $0.y) },
+                                        imageSize: CGSize(width: width, height: height))
+    }
+    public var solveStarField: @MainActor (GoToController.StarField, Double) -> PlateSolver.Solution?
+        = { field, fovDeg in
+            PlateSolver.shared.solve(centroids: field.centroids, imageSize: field.imageSize,
+                                     fovEstimateDeg: fovDeg)
+        }
 
     public init(prepareCapture: @escaping (CaptureRecipe) async throws -> (width: Int, height: Int),
                 captureSub: @escaping (CaptureRecipe, Int) async throws -> SubFrame,
@@ -435,6 +459,21 @@ public final class SessionEngine: ObservableObject {
     /// Stack grid dimensions from `prepareCapture` — the grid frame measurement
     /// runs on when the stacker can't provide an observation itself.
     private var captureDims = (width: 0, height: 0)
+    /// Plate-solve GoTo state (feature 5). `goToActive` goes true after the
+    /// first successful acquire — drift cross-checks only run once a solve has
+    /// proven the sky is solvable tonight.
+    private var goToActive = false
+    /// Set on flap recovery: pointing may have jumped (re-dock recenter), so a
+    /// GoTo-capable session re-acquires before capture resumes.
+    private var pendingReacquire = false
+    private var lastDriftCheckAt: Date?
+    private var nudgesAtLastDriftCheck = 0
+    /// Drift cross-check cadence: every 10 min, or after 5 framing nudges,
+    /// whichever comes first.
+    static let driftCheckInterval: TimeInterval = 600
+    static let driftCheckNudgeCount = 5
+    /// Measured drift above this gets a corrective impulse (deg).
+    static let driftToleranceDeg = 1.0
     private let pollInterval: TimeInterval = 0.25
     private let previewEvery = 10
 
@@ -470,6 +509,10 @@ public final class SessionEngine: ObservableObject {
         focusSharpnessMean = nil
         focusDrifting = false
         captureDims = (0, 0)
+        goToActive = false
+        pendingReacquire = false
+        lastDriftCheckAt = nil
+        nudgesAtLastDriftCheck = 0
         netYawDeg = 0
         thermalBackoffSeconds = 0
         lastNudgeAt = nil
@@ -635,6 +678,11 @@ public final class SessionEngine: ObservableObject {
     /// design: any failure (no location fix, no motion hardware, authority revoked,
     /// envelope refusal…) falls back to manual framing with an explanatory status —
     /// it must NEVER end the session.
+    ///
+    /// This is the COARSE half of aiming (±5–15° compass budget, target in the
+    /// 73° frame). The PRECISE half — plate-solve GoTo to ≤ 0.5° — runs at the
+    /// start of the Capture phase (`runGoToAcquire`), because a solve needs a
+    /// live camera frame and the capture pipeline only exists from that point.
     private func runAimAssist(target: CelestialTarget) async {
         guard mount.authority == .granted else {
             statusDetail = "Squeeze the gimbal trigger for auto-aim, or frame manually."
@@ -755,6 +803,15 @@ public final class SessionEngine: ObservableObject {
         captureDims = dims
         stacker.reset(width: dims.width, height: dims.height)
 
+        // Plate-solve GoTo stage (feature 5): the camera is live now, so the
+        // compass-coarse aim from the Aim phase can be upgraded to solver
+        // precision (≤ 0.5°). It runs here — not in the Aim phase — because a
+        // solve needs a real frame and the capture pipeline only exists from
+        // this point. Best-effort: any failure narrates why and the session
+        // continues on the AimAssist aim.
+        await runGoToAcquire(shot: shot, recipe: recipe, reacquire: false)
+        try Task.checkCancellation()
+
         // Focus-sweep stage (between Calibrate and the capture loop): the
         // camera is live and locked at infinity — try to do better than the
         // hard stop before the first stacked frame. Never fatal; a skip or a
@@ -780,6 +837,15 @@ public final class SessionEngine: ObservableObject {
             try Task.checkCancellation()
             syncMirrors()
             try await pauseGateway(shot: shot)     // background pause + flap handling
+            if pendingReacquire {
+                // Flap recovery invalidated pointing (re-dock can recenter the
+                // head) — GoTo-capable sessions re-acquire the target with a
+                // solve before capture resumes (registered style only; the
+                // guard inside no-ops for everything else).
+                pendingReacquire = false
+                await runGoToAcquire(shot: shot, recipe: recipe, reacquire: true)
+                try Task.checkCancellation()
+            }
             try runGuardians()                     // thermal / battery / storage
             if shot.needsGimbal {
                 if recipe.nudgeTracking {
@@ -787,6 +853,8 @@ public final class SessionEngine: ObservableObject {
                 } else {
                     await keepaliveIfIdle()        // HOLD modes: defeat firmware sleep
                 }
+                await driftCheckIfDue(shot: shot, recipe: recipe)
+                try Task.checkCancellation()
             }
 
             let frame = try await hooks.captureSub(recipe, attempt)
@@ -979,6 +1047,137 @@ public final class SessionEngine: ObservableObject {
         }
     }
 
+    // MARK: Plate-solve GoTo (feature 5)
+
+    /// True when this session can close the aiming loop with plate solves:
+    /// a gimbal session with a registered stack whose recipe actually produces
+    /// solvable STAR fields (trails/timelapse never re-aim — the framing IS the
+    /// shot). Star-field targets only: a Lunar Detail recipe (1/125 s, ISO 100,
+    /// tele framing) can't register a single catalog star, so every solve would
+    /// fail and the fallback copy would blame clouds on a clear moonlit night —
+    /// dishonest narration for a shot the solver was never going to help.
+    private func goToSupported(_ shot: ShotModeItem) -> Bool {
+        shot.needsGimbal && shot.celestialTarget == .milkyWayCore
+            && shot.stackingStyle == .registered
+    }
+
+    /// The GoTo world seams, routed through the EXISTING capture hooks so
+    /// simulator tests inject synthetic solvable fields and no device-camera
+    /// path is reachable from tests. Each solve frame is a probe (index 0,
+    /// same as the focus sweep) — it never counts against the capture plan.
+    private func makeGoToIO(recipe: CaptureRecipe) -> GoToController.IO {
+        let hooks = self.hooks
+        return GoToController.IO(
+            captureField: { [weak self] in
+                if let self { try await self.waitWhileSuspended() }
+                let frame = try await hooks.captureSub(recipe, 0)
+                // Undecodable frame = nothing to read: an empty field flows
+                // through the controller's honest tooFewStars path.
+                return hooks.detectStarField(frame)
+                    ?? GoToController.StarField(centroids: [], imageSize: .zero)
+            },
+            solve: { field, fovDeg in hooks.solveStarField(field, fovDeg) },
+            now: { hooks.now() })
+    }
+
+    /// Run one GoTo acquire (initial aim refinement, or the re-acquire after a
+    /// flap recovery). Best-effort by design: every failure narrates an honest
+    /// status and leaves the session running on the coarse AimAssist aim —
+    /// it must NEVER end the session. Cancellation is re-surfaced by the
+    /// caller's `Task.checkCancellation()`.
+    private func runGoToAcquire(shot: ShotModeItem, recipe: CaptureRecipe,
+                                reacquire: Bool) async {
+        guard goToSupported(shot), let target = shot.celestialTarget else { return }
+        guard mount.authority == .granted else {
+            statusDetail = "Plate-solve aim needs gimbal control — keeping the compass aim."
+            return
+        }
+        guard let location = AppLocation.shared.current else {
+            statusDetail = "Plate-solve aim needs a location fix — keeping the compass aim."
+            return
+        }
+        let coord = AimAssist().resolve(target: target, location: location, date: hooks.now())
+        guard coord.altitudeDeg > 0 else { return }   // below horizon — Aim phase explained
+        statusDetail = reacquire
+            ? "Gimbal back — re-acquiring \(target.displayName) with a plate solve…"
+            : "Refining aim on \(target.displayName) with a plate solve…"
+        do {
+            let outcome = try await GoToController().acquire(
+                target: coord, location: location, mount: mount,
+                io: makeGoToIO(recipe: recipe)) { [weak self] line in
+                    self?.statusDetail = line
+                }
+            goToActive = true
+            pointingInvalidated = false          // pointing verified by the solve
+            lastDriftCheckAt = hooks.now()
+            nudgesAtLastDriftCheck = stats.nudges
+            lastMountActivityAt = hooks.now()
+            statusDetail = String(format: "Locked on %@ — %.1f° from center.",
+                                  target.displayName, outcome.finalErrorDeg)
+        } catch is CancellationError {
+            // Our own cancellation propagates via the caller's checkCancellation;
+            // a leaked one just means: continue on the coarse aim.
+            statusDetail = "Aim refinement interrupted — continuing on the compass aim."
+        } catch let failure as GoToController.Failure {
+            statusDetail = "Plate-solve aim skipped — \(failure.fallbackReason) "
+                + (reacquire ? "Check your framing (re-dock can recenter the head)."
+                             : "Keeping the compass aim — fine-tune by hand.")
+        } catch {
+            statusDetail = "Plate-solve aim couldn't finish — keeping the compass aim."
+        }
+    }
+
+    /// Mid-session drift cross-check: every 10 minutes, or after 5 framing
+    /// nudges, one extra solve verifies the frame still points at the target;
+    /// drift over 1° gets a corrective impulse, narrated. Only runs once GoTo
+    /// has locked on at least once this session (`goToActive`) — if the sky
+    /// never solved, there is nothing trustworthy to cross-check against.
+    private func driftCheckIfDue(shot: ShotModeItem, recipe: CaptureRecipe) async {
+        guard goToActive, goToSupported(shot), let target = shot.celestialTarget,
+              let location = AppLocation.shared.current else { return }
+        // A measured-cloudy sky cannot solve — don't burn a probe frame on a
+        // guaranteed failure while the cloud gate is already narrating the wait.
+        // The cadence clock is deliberately NOT advanced here, so the first
+        // check after the sky clears re-verifies pointing right away.
+        guard skyCondition != .cloudy else { return }
+        let now = hooks.now()
+        let elapsed = lastDriftCheckAt.map { now.timeIntervalSince($0) } ?? .infinity
+        let nudgesSince = stats.nudges - nudgesAtLastDriftCheck
+        guard elapsed >= Self.driftCheckInterval
+                || nudgesSince >= Self.driftCheckNudgeCount else { return }
+        lastDriftCheckAt = now
+        nudgesAtLastDriftCheck = stats.nudges
+        let coord = AimAssist().resolve(target: target, location: location, date: now)
+        guard coord.altitudeDeg > 0 else { return }
+        do {
+            let outcome = try await GoToController().driftCheck(
+                target: coord, location: location, mount: mount,
+                io: makeGoToIO(recipe: recipe),
+                toleranceDeg: Self.driftToleranceDeg) { [weak self] line in
+                    self?.statusDetail = line
+                }
+            if outcome.corrected {
+                stats.driftCorrections += 1
+                lastMountActivityAt = hooks.now()
+                statusDetail = String(format: "Drift corrected — the frame was %.1f° off "
+                                      + "%@.", outcome.driftDeg, target.displayName)
+            }
+        } catch is CancellationError {
+            // The capture loop's checkCancellation right after us handles it.
+        } catch let failure as GoToController.Failure {
+            // Benign: one missed cross-check. Narrate the honest typed reason —
+            // a mount-side refusal must never be blamed on the solve — and only
+            // promise nudge tracking when this recipe actually runs it.
+            statusDetail = "Drift check skipped — \(failure.fallbackReason) "
+                + (recipe.nudgeTracking ? "Nudge tracking continues."
+                                        : "Keeping the current aim.")
+        } catch {
+            statusDetail = "Drift check couldn't finish — "
+                + (recipe.nudgeTracking ? "relying on nudge tracking."
+                                        : "keeping the current aim.")
+        }
+    }
+
     // MARK: Mid-session exposure refinement (measured sky background)
 
     /// One-shot ISO refinement from the MEASURED sky background: after the
@@ -1148,6 +1347,7 @@ public final class SessionEngine: ObservableObject {
             if isDocked {
                 stats.flapsRecovered += 1
                 pointingInvalidated = true   // never assume pointing continuity after re-dock
+                pendingReacquire = true      // GoTo-capable sessions re-verify with a solve
                 interruption = nil
                 statusDetail = "Gimbal back — check your framing (re-dock can recenter the head)."
                 _ = await mount.waitSettled()
@@ -1298,6 +1498,7 @@ public final class SessionEngine: ObservableObject {
         let seconds = Int(stats.integrationSeconds) % 60
         var line = "\(stats.subsAccepted) frames · \(minutes)m \(seconds)s integrated"
         if stats.nudges > 0 { line += " · \(stats.nudges) nudges" }
+        if stats.driftCorrections > 0 { line += " · \(stats.driftCorrections) drift fixes" }
         if stats.flapsRecovered > 0 { line += " · \(stats.flapsRecovered) reconnects" }
         if stats.subsSkippedClouds > 0 {
             line += " · \(stats.subsSkippedClouds) cloud frames waited out"

@@ -180,8 +180,8 @@ final class AutoTestRunner: ObservableObject {
     /// Debug hook for the plate-solve core (ROADMAP #4): detect stars on the
     /// latest stacked preview with the CPUStacker detector and hand the
     /// centroids to `PlateSolver`. Reports the solved center / roll / scale or
-    /// the honest failure reason. Nothing in the session loop consumes this yet
-    /// — GoTo (feature 5) will close the loop.
+    /// the honest failure reason. The session loop's live consumer is
+    /// `GoToController` (feature 5); this action stays as the on-demand probe.
     private func solvePreview(_ cmd: Command) {
         guard let image = SessionEngine.shared.latestPreview else {
             writeJSON(["id": cmd.id, "action": "solve_preview",
