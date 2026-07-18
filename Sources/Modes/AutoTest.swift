@@ -17,6 +17,7 @@ import AVFoundation
 /// Command file format:
 ///   { "id": "any-unique-string", "action": "status" }
 ///   { "id": "...", "action": "run_session", "modeId": "startrails", "targetSubs": 20, "timeoutSeconds": 120 }
+///   { "id": "...", "action": "solve_preview", "fovDeg": 70 }   // plate-solve the latest stack preview
 @MainActor
 final class AutoTestRunner: ObservableObject {
     static let shared = AutoTestRunner()
@@ -55,6 +56,7 @@ final class AutoTestRunner: ObservableObject {
         var modeId: String?
         var targetSubs: Int?
         var timeoutSeconds: Double?
+        var fovDeg: Double?
     }
 
     private func pollOnce() async {
@@ -72,6 +74,8 @@ final class AutoTestRunner: ObservableObject {
             writeStatusReport(commandID: cmd.id)
         case "run_session":
             await runSession(cmd)
+        case "solve_preview":
+            solvePreview(cmd)
         default:
             writeJSON(["id": cmd.id, "error": "unknown action \(cmd.action)"], to: "report.json")
         }
@@ -171,6 +175,56 @@ final class AutoTestRunner: ObservableObject {
         // Keep the landing report on screen briefly, then dismiss.
         try? await Task.sleep(nanoseconds: 8_000_000_000)
         presentedShot = nil
+    }
+
+    /// Debug hook for the plate-solve core (ROADMAP #4): detect stars on the
+    /// latest stacked preview with the CPUStacker detector and hand the
+    /// centroids to `PlateSolver`. Reports the solved center / roll / scale or
+    /// the honest failure reason. Nothing in the session loop consumes this yet
+    /// — GoTo (feature 5) will close the loop.
+    private func solvePreview(_ cmd: Command) {
+        guard let image = SessionEngine.shared.latestPreview else {
+            writeJSON(["id": cmd.id, "action": "solve_preview",
+                       "solved": "no", "error": "no stack preview — run a session first"],
+                      to: "report.json")
+            return
+        }
+        let width = image.width, height = image.height
+        guard let gray = CPUStacker.grayscaleFloats(from: image, width: width, height: height) else {
+            writeJSON(["id": cmd.id, "action": "solve_preview",
+                       "solved": "no", "error": "preview could not be decoded"],
+                      to: "report.json")
+            return
+        }
+        let stars = CPUStacker.detectStars(in: gray, width: width, height: height)
+        let centroids = stars.map { CGPoint(x: $0.x, y: $0.y) }   // brightest-first
+        let fov = cmd.fovDeg ?? 70.0
+        let started = Date()
+        let solution = PlateSolver.shared.solve(centroids: centroids,
+                                                imageSize: CGSize(width: width, height: height),
+                                                fovEstimateDeg: fov)
+        var report: [String: String] = [
+            "id": cmd.id,
+            "action": "solve_preview",
+            "starCount": "\(centroids.count)",
+            "fovEstimateDeg": String(format: "%.1f", fov),
+            "solveMillis": String(format: "%.0f", Date().timeIntervalSince(started) * 1000),
+        ]
+        if let s = solution {
+            report["solved"] = "yes"
+            report["centerRAHours"] = String(format: "%.4f", s.center.raHours)
+            report["centerRADeg"] = String(format: "%.4f", s.centerRADeg)
+            report["centerDecDeg"] = String(format: "%.4f", s.centerDecDeg)
+            report["rollDeg"] = String(format: "%.2f", s.rollDeg)
+            report["plateScalePxPerDeg"] = String(format: "%.2f", s.plateScalePxPerDeg)
+            report["matchedCount"] = "\(s.matchedCount)"
+            report["residualPx"] = String(format: "%.2f", s.residualPx)
+        } else {
+            report["solved"] = "no"
+            report["error"] = "no verified match (needs ≥6 catalog stars in field — "
+                            + "mag ≤3.5 catalog wants a wide or star-rich view)"
+        }
+        writeJSON(report, to: "report.json")
     }
 
     // MARK: - Output helpers
