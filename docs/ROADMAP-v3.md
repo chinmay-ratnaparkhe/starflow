@@ -4,9 +4,9 @@ GOALS: (G1) First clear-night Milky Way image that wows. (G2) Zero-hands session
 
 | # | Feature (BASICS-FIRST ORDER per owner 2026-07-18) | Notes | Status |
 |---|---------|-------|--------|
-| 0 | Color stacking + orientation (in flight wf_814f1db7) | merge when green | building |
-| 1 | Sky-condition detection: cloud detector from live frames (star-count + background trend — star detection exists), city/Bortle sanity from measured sky background; Tonight verdict + in-session advice ("clouds — pause?") | basic honesty | next |
-| 2 | Focus assist: star-FWHM live meter + tap-to-refocus sweep | sharp stars = everything | |
+| 0 | Color stacking + orientation (in flight wf_814f1db7) | merged | CERTIFIED 2x-green |
+| 1 | Sky-condition detection: cloud detector from live frames (star-count + background trend — star detection exists), city/Bortle sanity from measured sky background; Tonight verdict + in-session advice ("clouds — pause?") | basic honesty | CERTIFIED 2x-green |
+| 2 | Focus assist: star-FWHM live meter + tap-to-refocus sweep | sharp stars = everything | building |
 | 3 | Milky Way session polish: exposure auto-tune from measured sky, framing guidance overlay (core position in FOV), live SNR/depth meter | THE core experience | |
 | 4 | Plate-solve core: triangle-hash matcher + bright-star DB, tele-crop first | MATH via deep-research | |
 | 5 | Plate-solve GoTo: slew→shoot→solve→correct (0.25°) | crown jewel; perfects MW aim | |
