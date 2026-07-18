@@ -176,6 +176,28 @@ public final class CaptureEngine: ObservableObject {
                 continuation.resume()
             }
         }
+        // AVCaptureSession reverts custom exposure when it starts running, so the
+        // lock must be RE-applied after startRunning and we must WAIT until the
+        // sensor is genuinely integrating near the target before the first capture
+        // (bench-measured: firing early yields ~8 ms auto-exposure frames at 15 fps).
+        if let camera {
+            _ = try? await withCheckedThrowingContinuation {
+                (cont: CheckedContinuation<(Double, Double), Error>) in
+                sessionQueue.async { [recipe = self.activeRecipe] in
+                    do { cont.resume(returning: try Self.lockNightExposure(on: camera, recipe: recipe)) }
+                    catch { cont.resume(throwing: error) }
+                }
+            }
+            let target = min(activeRecipe.exposureSeconds, 1.0)
+            let deadline = Date().addingTimeInterval(3.0)
+            while Date() < deadline {
+                let current = CMTimeGetSeconds(camera.exposureDuration)
+                if current >= target * 0.5 { break }
+                try? await Task.sleep(nanoseconds: 100_000_000)
+            }
+            appliedExposureSeconds = CMTimeGetSeconds(camera.exposureDuration)
+            appliedISO = Double(camera.iso)
+        }
         isRunning = true
         isPaused = false
         captureNext()

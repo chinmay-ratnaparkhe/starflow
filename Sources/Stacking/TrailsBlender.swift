@@ -33,6 +33,7 @@ public final class TrailsBlender: Stacking {
     private var height = 0
     private var maxBuf: [Float] = []
     private var referenceBackground: Float?
+    private var backgroundJumpStreak = 0
     private var acceptedCount = 0
     private var rejectedCount = 0
     private var integration: Double = 0
@@ -66,8 +67,18 @@ public final class TrailsBlender: Stacking {
 
         let background = Float(CPUStacker.clippedStats(gray).mean)
         if let reference = referenceBackground, background - reference > maxBackgroundJump {
-            rejectedCount += 1
-            return false
+            // Exposure settling (first frames) or a genuine scene change must not
+            // poison the whole session: tolerate the guard early, and re-seed the
+            // reference after 3 consecutive jumps instead of rejecting forever.
+            backgroundJumpStreak += 1
+            if acceptedCount > 10 && backgroundJumpStreak < 3 {
+                rejectedCount += 1
+                return false
+            }
+            referenceBackground = background
+            backgroundJumpStreak = 0
+        } else {
+            backgroundJumpStreak = 0
         }
         if referenceBackground == nil { referenceBackground = background }
 
