@@ -468,6 +468,19 @@ public final class SessionEngine: ObservableObject {
     private var pendingReacquire = false
     private var lastDriftCheckAt: Date?
     private var nudgesAtLastDriftCheck = 0
+    /// Star-colour calibration state (feature 6). The latest SUCCESSFUL plate
+    /// solve (acquire or mid-session drift check) with enough catalog matches,
+    /// plus the solve frame's pixel size — the geometry that projects catalog
+    /// stars into the stack grid. Nil when nothing has solved: calibration is
+    /// then skipped silently (no fake calibration ever).
+    private var colorCalSolve: (solution: PlateSolver.Solution, imageSize: CGSize)?
+    /// Calibration is evaluated at most once per session (applied or declined).
+    private var colorCalEvaluated = false
+    /// Solves with fewer verified catalog matches than this never calibrate.
+    static let colorCalMinMatches = 5
+    /// Accepted stacked frames before the accumulators are measured — a
+    /// near-empty mean would make the aperture photometry noise-dominated.
+    static let colorCalMinFrames = 5
     /// Drift cross-check cadence: every 10 min, or after 5 framing nudges,
     /// whichever comes first.
     static let driftCheckInterval: TimeInterval = 600
@@ -513,6 +526,8 @@ public final class SessionEngine: ObservableObject {
         pendingReacquire = false
         lastDriftCheckAt = nil
         nudgesAtLastDriftCheck = 0
+        colorCalSolve = nil
+        colorCalEvaluated = false
         netYawDeg = 0
         thermalBackoffSeconds = 0
         lastNudgeAt = nil
@@ -868,6 +883,7 @@ public final class SessionEngine: ObservableObject {
                 && shot.stackingStyle == .registered
             let skippedForClouds = cloudGateActive && skyCondition == .cloudy
             var skyAdvicePosted = false
+            var colorCalNarrated = false
             if skippedForClouds {
                 // `feedRefine: false`: a cloud-lit background is real but
                 // unrepresentative of the sky the stack exposes under — it must
@@ -893,6 +909,9 @@ public final class SessionEngine: ObservableObject {
                     stats.integrationSeconds += frame.exposureSeconds
                     rejectionStreak = 0
                     noStarStreak = 0
+                    // Star-colour calibration (feature 6): once per session,
+                    // only after a solve succeeded and the stack has substance.
+                    colorCalNarrated = maybeCalibrateStarColors()
                     if stats.subsAccepted % previewEvery == 0 {
                         // Rotated the same way as the final image, so the live view
                         // and the landing report can never disagree on orientation.
@@ -941,7 +960,7 @@ public final class SessionEngine: ObservableObject {
                     frameSeconds: recipe.exposureSeconds + recipe.intervalSeconds,
                     extending: cloudExtensionActive)
             } else if (cloudGateActive && skyCondition == .cloudy) || skyAdvicePosted
-                        || refineNarrated {
+                        || refineNarrated || colorCalNarrated {
                 // Hold the sky advice on screen for at least one frame instead
                 // of overwriting it with the sub counter immediately.
             } else if rejectionStreak < 8 {
@@ -1076,7 +1095,17 @@ public final class SessionEngine: ObservableObject {
                 return hooks.detectStarField(frame)
                     ?? GoToController.StarField(centroids: [], imageSize: .zero)
             },
-            solve: { field, fovDeg in hooks.solveStarField(field, fovDeg) },
+            solve: { [weak self] field, fovDeg in
+                let solution = hooks.solveStarField(field, fovDeg)
+                // Every successful solve with enough catalog matches is also
+                // the geometry star-colour calibration needs (feature 6) —
+                // remember the latest one; `maybeCalibrateStarColors` consumes
+                // it once the stack has accumulated enough frames.
+                if let solution, solution.matchedCount >= SessionEngine.colorCalMinMatches {
+                    self?.colorCalSolve = (solution, field.imageSize)
+                }
+                return solution
+            },
             now: { hooks.now() })
     }
 
@@ -1176,6 +1205,67 @@ public final class SessionEngine: ObservableObject {
                 + (recipe.nudgeTracking ? "relying on nudge tracking."
                                         : "keeping the current aim.")
         }
+    }
+
+    // MARK: Star-colour calibration (feature 6, SPCC-lite)
+
+    /// One-shot star-colour calibration against the plate-solver catalog:
+    /// project every catalog star the latest successful solve places in the
+    /// frame into the stack grid, measure its per-channel aperture flux in the
+    /// stack's linear accumulators, and let `ColorCalibrator` fit the two
+    /// global render gains from the stars' known B−V colours (white reference:
+    /// average spiral galaxy). Runs at most once per session, and ONLY when a
+    /// real solve succeeded (`colorCalSolve`) — a session that never solved is
+    /// left uncalibrated, silently: no fake calibration ever. Returns true
+    /// when calibration was applied and narrated.
+    ///
+    /// Honest limits: the solve frame and the stack reference can differ by a
+    /// few pixels of drift — the calibrator re-centres each star on its local
+    /// peak, and stars it cannot find simply drop out. Stars with a clipped
+    /// (saturated) core are excluded too: a clipped channel reads the sensor
+    /// ceiling, not the star's colour, and the catalog's bright stars are the
+    /// first to clip on a phone sensor. Fewer than
+    /// `ColorCalibrator.minimumStars` usable stars → the whole calibration
+    /// declines (nil) and the image stays as stacked.
+    private func maybeCalibrateStarColors() -> Bool {
+        guard !colorCalEvaluated,
+              let solve = colorCalSolve,
+              stats.subsAccepted >= Self.colorCalMinFrames,
+              let cpu = stacker as? CPUStacker else { return false }
+        colorCalEvaluated = true   // one evaluation per session, applied or declined
+        let dims = cpu.dimensions()
+        let solveW = Double(solve.imageSize.width)
+        let solveH = Double(solve.imageSize.height)
+        guard dims.width > 0, dims.height > 0, solveW > 0, solveH > 0 else { return false }
+        // Solve-frame pixels → stack-grid pixels: the stacker rescales every
+        // frame into the reset grid, so both axes scale independently.
+        let sx = Double(dims.width) / solveW
+        let sy = Double(dims.height) / solveH
+        let margin = ColorCalibrator.measurementMargin
+        var matches: [ColorCalibrator.MatchedStar] = []
+        for star in PlateSolver.catalog {
+            guard let p = PlateSolver.tangentProject(raDeg: star.raDeg, decDeg: star.decDeg,
+                                                     centerRADeg: solve.solution.centerRADeg,
+                                                     centerDecDeg: solve.solution.centerDecDeg)
+            else { continue }
+            let pixel = PlateSolver.pixel(xiDeg: p.x, etaDeg: p.y,
+                                          imageSize: solve.imageSize,
+                                          plateScalePxPerDeg: solve.solution.plateScalePxPerDeg,
+                                          rollDeg: solve.solution.rollDeg)
+            let x = Double(pixel.x) * sx
+            let y = Double(pixel.y) * sy
+            guard x >= margin, x <= Double(dims.width) - margin,
+                  y >= margin, y <= Double(dims.height) - margin else { continue }
+            matches.append(ColorCalibrator.MatchedStar(bv: star.bv, x: x, y: y))
+        }
+        let rgb = cpu.accumulatedRGB()
+        guard let gains = ColorCalibrator.calibrate(matches: matches,
+                                                    r: rgb.r, g: rgb.g, b: rgb.b,
+                                                    width: dims.width, height: dims.height)
+        else { return false }
+        cpu.applyChannelGains(r: gains.rGain, b: gains.bGain)
+        statusDetail = "Star colors calibrated against \(gains.starCount) catalog stars."
+        return true
     }
 
     // MARK: Mid-session exposure refinement (measured sky background)

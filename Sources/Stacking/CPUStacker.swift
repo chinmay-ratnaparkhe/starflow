@@ -21,8 +21,11 @@ import Accelerate
 ///
 /// Colour model: detection and registration run on the same grayscale derivative as v1
 /// (bit-identical maths); RGB planes are ingested alongside and accumulated per channel.
-/// The result is a colour stack — still not a colour-CALIBRATED final image (no matrix,
-/// no white-balance fit), but real star colour instead of monochrome luminance.
+/// The result is a colour stack — real star colour instead of monochrome luminance.
+/// Optionally, star-colour calibration (feature 6) applies two GLOBAL channel gains
+/// fitted by `ColorCalibrator` against plate-solver catalog matches via
+/// `applyChannelGains(r:b:)` — render-time only, accumulators untouched, and only
+/// when a session actually solved (no full colour matrix; still SPCC-lite).
 public final class CPUStacker: Stacking {
 
     // MARK: - Public support types
@@ -95,6 +98,12 @@ public final class CPUStacker: Stacking {
     private var acceptedCount = 0
     private var rejectedCount = 0
     private var integration: Double = 0
+    /// Star-colour calibration gains (feature 6, `ColorCalibrator`): applied to
+    /// the R and B channels at RENDER time only — the linear accumulators are
+    /// never touched, so calibration can be applied (or re-applied) at any
+    /// point without contaminating the stacked data. 1.0 = uncalibrated.
+    private var renderGainR: Float = 1
+    private var renderGainB: Float = 1
 
     /// Diagnostics from the most recent `add` (for session telemetry chips).
     public private(set) var lastMatchCount = 0
@@ -148,6 +157,8 @@ public final class CPUStacker: Stacking {
         registrationActive = registrationEnabled
         lastRejectionReason = nil
         lastSkyObservation = nil
+        renderGainR = 1
+        renderGainB = 1
     }
 
     /// Returns false when the frame is rejected (undecodable / misaligned / cloudy);
@@ -266,6 +277,23 @@ public final class CPUStacker: Stacking {
         return (width, height)
     }
 
+    /// Apply star-colour calibration gains (feature 6): multiply the R and B
+    /// channels by these factors in the final render (preview and
+    /// `finalImage`). Additive by design — the accumulators are untouched, so
+    /// detection, registration, kappa clipping, and every accumulated value
+    /// are bit-identical with or without calibration. `reset` restores 1/1.
+    public func applyChannelGains(r: Double, b: Double) {
+        lock.lock(); defer { lock.unlock() }
+        renderGainR = Float(r)
+        renderGainB = Float(b)
+    }
+
+    /// The render gains currently in effect (r, b); (1, 1) = uncalibrated.
+    public func channelGains() -> (r: Double, b: Double) {
+        lock.lock(); defer { lock.unlock() }
+        return (Double(renderGainR), Double(renderGainB))
+    }
+
     // MARK: - Accumulation
 
     private func accumulate(_ frame: [Float],
@@ -343,9 +371,11 @@ public final class CPUStacker: Stacking {
             let u = min(1.0, max(0.0, Double(meanBuf[i] - black) / range))
             let gain = u > 1e-6 ? asinh(u / beta) * norm / u : zeroGain
             let g = Float(gain / range)
-            outR[i] = min(1, max(0, (meanR[i] - blackR) * g))
+            // Star-colour calibration (feature 6): render-time channel gains
+            // only — the accumulators feeding this loop stay untouched.
+            outR[i] = min(1, max(0, (meanR[i] - blackR) * g * renderGainR))
             outG[i] = min(1, max(0, (meanG[i] - blackG) * g))
-            outB[i] = min(1, max(0, (meanB[i] - blackB) * g))
+            outB[i] = min(1, max(0, (meanB[i] - blackB) * g * renderGainB))
         }
         return Self.rgbImage(r: outR, g: outG, b: outB, width: width, height: height)
     }
