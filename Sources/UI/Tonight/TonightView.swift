@@ -6,6 +6,7 @@ import SwiftUI
 public struct TonightView: View {
 
     @ObservedObject private var appearance = Appearance.shared
+    @ObservedObject private var sessions = SessionStore.shared
     @StateObject private var locationProvider = LocationProvider()
     @AppStorage("skyQuality") private var skyQualityRaw: Int = SkyQuality.suburb.rawValue
 
@@ -39,6 +40,9 @@ public struct TonightView: View {
                         if let ctx = context {
                             verdictCard(ctx: ctx, night: night)
                             skyStrip(ctx: ctx)
+                            if let measured = recentMeasuredSky {
+                                measuredSkyChip(measured, night: night)
+                            }
                             if !outlook.isEmpty {
                                 SFSectionLabel("Next 7 nights")
                                 OutlookStrip(nights: outlook)
@@ -181,6 +185,74 @@ public struct TonightView: View {
                 .accessibilityLabel("Set up \(entry.item.name)")
                 .accessibilityHint("Starts a guided \(entry.item.name) session.")
             }
+        }
+    }
+
+    // MARK: Measured sky (last session)
+
+    /// The newest logbook record, when it is from the past 12 hours and carries
+    /// a measured sky condition. Measured — from that session's actual frames —
+    /// never a forecast. Deliberately only the NEWEST record: the chip says
+    /// "Last session", so an older graded session must never speak for an
+    /// ungraded newer one.
+    private var recentMeasuredSky: SessionRecord? {
+        guard let newest = sessions.records.first,
+              let condition = newest.skyCondition, condition != .unknown,
+              Date().timeIntervalSince(newest.date) < 12 * 3600
+        else { return nil }
+        return newest
+    }
+
+    /// Small capsule chip: "Last session sky: cloudy · 2 hours ago". Carries the
+    /// SIMULATED badge on simulator builds, where session frames are synthetic.
+    private func measuredSkyChip(_ record: SessionRecord, night: Bool) -> some View {
+        let condition = record.skyCondition ?? .unknown
+        let tint = skyConditionTint(condition, night: night)
+        return HStack(spacing: 8) {
+            Image(systemName: skyConditionSymbol(condition))
+                .font(.system(size: 13, weight: .semibold))
+                .foregroundStyle(tint)
+            Text("Last session sky: \(condition.displayName)")
+                .font(Theme.caption)
+                .foregroundStyle(Theme.primaryText(night))
+            Text(record.date, format: .relative(presentation: .numeric))
+                .font(Theme.caption)
+                .foregroundStyle(Theme.secondaryText(night))
+            if MountService.isSimulated {
+                SimulatedSourceBadge()
+            }
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(Capsule().fill(tint.opacity(0.10)))
+        .overlay(Capsule().strokeBorder(tint.opacity(0.30), lineWidth: 1))
+        .accessibilityElement(children: .ignore)
+        // Mirror everything the sighted chip shows: condition, when it was
+        // measured, and the simulated-source disclosure (the badge itself is
+        // hidden from VoiceOver by `children: .ignore`).
+        .accessibilityLabel(
+            "Last session sky: \(condition.displayName), measured from your session's frames "
+            + record.date.formatted(.relative(presentation: .numeric)) + "."
+            + (MountService.isSimulated ? " Simulated data source." : ""))
+    }
+
+    private func skyConditionTint(_ condition: SkyCondition, night: Bool) -> Color {
+        switch condition {
+        case .clear: return Theme.positive(night)
+        case .hazy: return Theme.warning(night)
+        case .cloudy: return Theme.secondaryText(night)
+        case .overexposed: return Theme.warning(night)
+        case .unknown: return Theme.secondaryText(night)
+        }
+    }
+
+    private func skyConditionSymbol(_ condition: SkyCondition) -> String {
+        switch condition {
+        case .clear: return "moon.stars.fill"
+        case .hazy: return "cloud.fog.fill"
+        case .cloudy: return "cloud.fill"
+        case .overexposed: return "sun.max.fill"
+        case .unknown: return "questionmark.circle"
         }
     }
 

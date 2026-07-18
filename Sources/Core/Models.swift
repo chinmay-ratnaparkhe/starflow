@@ -287,5 +287,9 @@ public struct SessionStats: Sendable {
     /// Sampled at session start and re-sampled when the Capture phase begins;
     /// drives the develop-phase rotation that makes the final image upright.
     public var captureTilt: DeviceTilt = .portrait
+    /// Last measured sky condition during capture (`SkyConditionMonitor`).
+    /// `.unknown` when the monitor never saw enough starry frames to grade.
+    /// Appended field with a default so the empty init keeps its meaning.
+    public var skyCondition: SkyCondition = .unknown
     public init() {}
 }

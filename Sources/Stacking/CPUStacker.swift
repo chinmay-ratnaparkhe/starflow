@@ -100,6 +100,15 @@ public final class CPUStacker: Stacking {
     public private(set) var lastMatchCount = 0
     public private(set) var lastResidualPx = 0.0
 
+    /// Sky-condition telemetry from the most recent DECODABLE frame handed to
+    /// `add` — star count on the stack grid plus the sigma-clipped background —
+    /// recorded whether or not that frame was accepted. Nil until the first
+    /// decodable frame after `reset`. Additive accessor for
+    /// `SkyConditionMonitor`; deliberately NOT part of the `Stacking` protocol
+    /// (SessionEngine reads it via a conditional cast, like
+    /// `lastRejectionReason`).
+    public private(set) var lastSkyObservation: SkyObservation?
+
     /// True while frames are being star-aligned against the reference. Goes false when
     /// the stack was seeded by a frame with too few stars (indoor / starless scene →
     /// unregistered accumulate: plain running mean, no alignment) or when this stacker
@@ -138,6 +147,7 @@ public final class CPUStacker: Stacking {
         lastResidualPx = 0
         registrationActive = registrationEnabled
         lastRejectionReason = nil
+        lastSkyObservation = nil
     }
 
     /// Returns false when the frame is rejected (undecodable / misaligned / cloudy);
@@ -160,10 +170,17 @@ public final class CPUStacker: Stacking {
             return false
         }
 
-        let stars = registrationEnabled
-            ? Self.detectStars(in: gray, width: width, height: height,
-                               maxStars: maxStarsPerFrame, sigmaK: detectionSigmaK)
-            : []
+        // Detection now runs for every decodable frame (registration on or off)
+        // so `lastSkyObservation` stays honest for sky-condition monitoring;
+        // registration maths below still sees exactly what it saw before
+        // (an empty list when registration is disabled). The extra detection
+        // pass on unregistered stacks (timelapse cadence) is negligible.
+        let detected = Self.detectStars(in: gray, width: width, height: height,
+                                        maxStars: maxStarsPerFrame, sigmaK: detectionSigmaK)
+        lastSkyObservation = SkyObservation(starCount: detected.count,
+                                            backgroundLevel: Self.clippedStats(gray).mean,
+                                            timestamp: frame.timestamp)
+        let stars = registrationEnabled ? detected : []
 
         let transform: SimilarityTransform
         if acceptedCount == 0 {

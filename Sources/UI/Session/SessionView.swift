@@ -159,7 +159,10 @@ struct SessionView: View {
             nudges: stats.nudges,
             flapsRecovered: stats.flapsRecovered,
             targetSubCount: shot.recipe.targetSubCount,
-            captureTilt: stats.captureTilt)
+            captureTilt: stats.captureTilt,
+            // .unknown means "never had enough starry frames to grade" — store
+            // nothing rather than a hollow verdict.
+            skyCondition: stats.skyCondition == .unknown ? nil : stats.skyCondition)
         // latestPreview is already rotated upright by the engine's develop phase,
         // so the logbook thumbnail and share sheet inherit the correct orientation.
         SessionStore.shared.save(record, thumbnail: engine.latestPreview)

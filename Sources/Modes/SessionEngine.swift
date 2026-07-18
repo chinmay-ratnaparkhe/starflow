@@ -233,6 +233,10 @@ public final class SessionEngine: ObservableObject {
     @Published public private(set) var awaitingResume = false
     /// One-line human status for the session screen.
     @Published public private(set) var statusDetail = "Ready"
+    /// Rolling measured sky condition for the current session, classified from
+    /// per-frame star counts + background levels by `SkyConditionMonitor`.
+    /// `.unknown` until enough starry frames establish a baseline.
+    @Published public private(set) var skyCondition: SkyCondition = .unknown
 
     // MARK: Published telemetry mirrors
 
@@ -258,6 +262,13 @@ public final class SessionEngine: ObservableObject {
     /// Test/preview seam. `SessionHooks.live()` already routes to the real
     /// `CaptureEngine` on device builds — no assembly-time replacement is needed.
     public static var defaultHooksProvider: () -> SessionHooks = { SessionHooks.live() }
+
+    /// Defaulted engine setting: while the measured sky condition is `.cloudy`
+    /// during a REGISTERED-stack session, keep capturing but skip handing
+    /// frames to the stacker (they would only be rejected by registration, and
+    /// skipping saves the CPU for the moment the sky opens). Trails and
+    /// timelapse styles are never gated — clouds are part of those shots.
+    public var pauseStackingWhenCloudy = true
 
     private let mount: MountControlling
     /// Explicitly injected stacker (tests/previews). When present it is used for every
@@ -305,6 +316,11 @@ public final class SessionEngine: ObservableObject {
     /// Consecutive rejections whose CPUStacker reason was "too few stars" — drives the
     /// "this mode needs the night sky" guidance without interrupting the session.
     private var noStarStreak = 0
+    /// Per-session sky-condition classifier (rebuilt on every `start`).
+    private var skyMonitor = SkyConditionMonitor()
+    /// Stack grid dimensions from `prepareCapture` — the grid frame measurement
+    /// runs on when the stacker can't provide an observation itself.
+    private var captureDims = (width: 0, height: 0)
     private let pollInterval: TimeInterval = 0.25
     private let previewEvery = 10
 
@@ -331,6 +347,9 @@ public final class SessionEngine: ObservableObject {
         gimbalBatteryWarned = false
         rejectionStreak = 0
         noStarStreak = 0
+        skyMonitor = SkyConditionMonitor()
+        skyCondition = .unknown
+        captureDims = (0, 0)
         netYawDeg = 0
         thermalBackoffSeconds = 0
         lastNudgeAt = nil
@@ -610,6 +629,7 @@ public final class SessionEngine: ObservableObject {
         // the clamp exactly the way it will for every sub. This drives the
         // develop-phase rotation that makes the final image match the live view.
         stats.captureTilt = hooks.captureTilt()
+        captureDims = dims
         stacker.reset(width: dims.width, height: dims.height)
         statusDetail = "Capturing…"
 
@@ -628,47 +648,149 @@ public final class SessionEngine: ObservableObject {
             }
 
             let frame = try await hooks.captureSub(recipe, index)
-            let accepted = stacker.add(frame: frame)
-            if accepted {
-                stats.subsAccepted += 1
-                stats.integrationSeconds += frame.exposureSeconds
-                rejectionStreak = 0
-                noStarStreak = 0
-                if stats.subsAccepted % previewEvery == 0 {
-                    // Rotated the same way as the final image, so the live view
-                    // and the landing report can never disagree on orientation.
-                    latestPreview = oriented(stacker.currentResult().preview) ?? latestPreview
-                }
-            } else {
+            // Cloud gate (defaulted engine setting): while the measured sky is
+            // cloudy in a registered-stack session, keep capturing but skip the
+            // accumulate — registration would only reject these frames. The
+            // monitor keeps watching every frame so it notices the gap opening.
+            let cloudGateActive = pauseStackingWhenCloudy
+                && shot.stackingStyle == .registered
+            let skippedForClouds = cloudGateActive && skyCondition == .cloudy
+            var skyAdvicePosted = false
+            if skippedForClouds {
+                skyAdvicePosted = observeSky(frame: frame, cpuStacker: nil,
+                                             gated: cloudGateActive)
                 stats.subsRejected += 1
-                rejectionStreak += 1
-                // CPUStacker-specific diagnostics (deliberately not on the Stacking
-                // protocol) — read via conditional cast.
-                if (stacker as? CPUStacker)?.lastRejectionReason == "too few stars" {
-                    noStarStreak += 1
-                } else {
+            } else {
+                let accepted = stacker.add(frame: frame)
+                skyAdvicePosted = observeSky(frame: frame, cpuStacker: stacker as? CPUStacker,
+                                             gated: cloudGateActive)
+                if accepted {
+                    stats.subsAccepted += 1
+                    stats.integrationSeconds += frame.exposureSeconds
+                    rejectionStreak = 0
                     noStarStreak = 0
-                }
-                if rejectionStreak == 8 {
-                    statusDetail = "Several frames rejected in a row — clouds rolling in, "
-                        + "or no stars in frame? Check the sky."
-                }
-                if noStarStreak == 10 {
-                    // Guidance only — the session keeps running (the sky may clear).
-                    statusDetail = "No stars detected — frames are real, but this mode "
-                        + "needs the night sky. Try Star Trails to test indoors."
+                    if stats.subsAccepted % previewEvery == 0 {
+                        // Rotated the same way as the final image, so the live view
+                        // and the landing report can never disagree on orientation.
+                        latestPreview = oriented(stacker.currentResult().preview) ?? latestPreview
+                    }
+                } else {
+                    stats.subsRejected += 1
+                    rejectionStreak += 1
+                    // CPUStacker-specific diagnostics (deliberately not on the Stacking
+                    // protocol) — read via conditional cast.
+                    if (stacker as? CPUStacker)?.lastRejectionReason == "too few stars" {
+                        noStarStreak += 1
+                    } else {
+                        noStarStreak = 0
+                    }
+                    if rejectionStreak == 8 {
+                        statusDetail = "Several frames rejected in a row — clouds rolling in, "
+                            + "or no stars in frame? Check the sky."
+                    }
+                    if noStarStreak == 10 {
+                        // Guidance only — the session keeps running (the sky may clear).
+                        statusDetail = "No stars detected — frames are real, but this mode "
+                            + "needs the night sky. Try Star Trails to test indoors."
+                    }
                 }
             }
             index += 1
-            if rejectionStreak < 8 {
-                statusDetail = "Sub \(index)/\(recipe.targetSubCount) · "
+            if skippedForClouds && !skyAdvicePosted {
+                // Steady-state cloud pause: re-post the honest waiting line every
+                // frame. Without this, any status written mid-pause (resume flow,
+                // thermal/battery guardians, flap recovery) would stick on screen
+                // for the rest of the cloud bank while frames are silently
+                // skipped — matching how the sub counter refreshes each frame on
+                // the normal path. The transition frame itself is excluded so the
+                // "Clouds rolling in" advice still holds for at least one frame.
+                statusDetail = "Cloudy — the stack is safe, waiting for a gap…"
+            } else if (cloudGateActive && skyCondition == .cloudy) || skyAdvicePosted {
+                // Hold the sky advice on screen for at least one frame instead
+                // of overwriting it with the sub counter immediately.
+            } else if rejectionStreak < 8 {
+                var line = "Sub \(index)/\(recipe.targetSubCount) · "
                     + "\(Int(stats.integrationSeconds)) s integrated"
+                if skyCondition != .clear && skyCondition != .unknown {
+                    line += " · \(skyCondition.displayName) sky"
+                }
+                statusDetail = line
             }
 
             let gap = recipe.intervalSeconds + thermalBackoffSeconds
             if gap > 0, index < recipe.targetSubCount {
                 try await waitGap(gap, shot: shot)
             }
+        }
+    }
+
+    // MARK: Sky-condition monitoring
+
+    /// Feed one captured frame's measurements to the sky monitor and surface
+    /// advice on condition transitions. Prefers the observation `CPUStacker`
+    /// already produced for this exact frame (star list + background are
+    /// by-products of stacking); falls back to measuring the frame directly on
+    /// the same stack grid when the stacker can't provide one (trails blends,
+    /// frames skipped during a cloud pause). Returns true when a transition
+    /// advice line was posted to `statusDetail`.
+    @discardableResult
+    private func observeSky(frame: SubFrame, cpuStacker: CPUStacker?, gated: Bool) -> Bool {
+        let observation: SkyObservation?
+        if let fromStacker = cpuStacker?.lastSkyObservation,
+           fromStacker.timestamp == frame.timestamp {
+            observation = fromStacker
+        } else if let image = frame.pixelData {
+            observation = SkyConditionMonitor.measure(image: image,
+                                                      width: captureDims.width,
+                                                      height: captureDims.height,
+                                                      at: frame.timestamp)
+        } else {
+            observation = nil
+        }
+        guard let observation else { return false }
+        let previous = skyCondition
+        let updated = skyMonitor.ingest(observation)
+        guard updated != previous else { return false }
+        skyCondition = updated
+        stats.skyCondition = updated
+        if let advice = SessionEngine.skyAdvice(from: previous, to: updated, gated: gated) {
+            statusDetail = advice
+            return true
+        }
+        return false
+    }
+
+    /// Honest one-liners for measured sky-condition transitions. `gated` is true
+    /// only when the cloud gate will actually pause the stack for this session
+    /// (registered style with `pauseStackingWhenCloudy` on) — the copy must
+    /// never promise a pause or a resume that trails/timelapse sessions, which
+    /// blend every frame clouds included, do not perform.
+    static func skyAdvice(from old: SkyCondition, to new: SkyCondition,
+                          gated: Bool) -> String? {
+        switch new {
+        case .cloudy:
+            return gated
+                ? "Clouds rolling in — the stack is safe, waiting for a gap…"
+                : "Clouds rolling in — star counts have collapsed."
+        case .clear:
+            if old == .unknown { return nil }
+            return gated
+                ? "Sky cleared — resuming the stack."
+                : "Sky cleared — stars are back."
+        case .hazy:
+            if old == .unknown {
+                return "Hazy sky measured — faint stars are muted tonight."
+            }
+            if old == .cloudy {
+                return gated
+                    ? "Clouds thinning to haze — resuming the stack."
+                    : "Clouds thinning to haze — some stars are back."
+            }
+            return "Haze moving in — star counts are dropping."
+        case .overexposed:
+            return "Sky background is near saturation — too much light here for faint stars."
+        case .unknown:
+            return nil
         }
     }
 
