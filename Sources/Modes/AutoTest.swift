@@ -22,6 +22,9 @@ final class AutoTestRunner: ObservableObject {
     static let shared = AutoTestRunner()
 
     @Published private(set) var active = false
+    /// When a remote session runs, the app presents the real Session UI so the
+    /// person holding the phone watches exactly what the harness is doing.
+    @Published var presentedShot: ShotModeItem?
 
     private var pollTask: Task<Void, Never>?
     private var lastHandledID: String?
@@ -112,6 +115,7 @@ final class AutoTestRunner: ObservableObject {
         let timeout = cmd.timeoutSeconds ?? Double(targetSubs) * 3 + 90
         let started = Date()
 
+        presentedShot = shot          // surface the real Session UI on screen
         engine.start(shot: shot)
 
         // Observe until we have enough subs, the engine completes, or timeout.
@@ -160,6 +164,10 @@ final class AutoTestRunner: ObservableObject {
             "previewWritten": engine.latestPreview != nil ? "yes" : "no",
             "wallSeconds": String(format: "%.0f", Date().timeIntervalSince(started)),
         ], to: "report.json")
+
+        // Keep the landing report on screen briefly, then dismiss.
+        try? await Task.sleep(nanoseconds: 8_000_000_000)
+        presentedShot = nil
     }
 
     // MARK: - Output helpers

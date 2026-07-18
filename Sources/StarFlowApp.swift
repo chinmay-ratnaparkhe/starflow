@@ -46,6 +46,7 @@ struct StarFlowApp: App {
 struct RootView: View {
     @Binding var hasOnboarded: Bool
     @ObservedObject private var appearance = Appearance.shared
+    @ObservedObject private var autotest = AutoTestRunner.shared
 
     var body: some View {
         ZStack {
@@ -54,6 +55,21 @@ struct RootView: View {
                 MainTabView()
             } else {
                 OnboardingView(onComplete: { hasOnboarded = true })
+            }
+        }
+        // Remote-driven sessions present the REAL session UI so the person
+        // holding the phone watches exactly what the test harness is doing.
+        .fullScreenCover(item: Binding(get: { autotest.presentedShot },
+                                       set: { autotest.presentedShot = $0 })) { shot in
+            ZStack(alignment: .top) {
+                SessionView(shot: shot)
+                Text("REMOTE TEST — driven over USB")
+                    .font(Theme.label)
+                    .kerning(1)
+                    .padding(.horizontal, 10).padding(.vertical, 5)
+                    .background(Capsule().fill(Theme.blue.opacity(0.25)))
+                    .foregroundStyle(Theme.blue)
+                    .padding(.top, 6)
             }
         }
     }
