@@ -8,6 +8,7 @@ struct SettingsView: View {
     @ObservedObject private var appearance = Appearance.shared
     @AppStorage("skyQuality") private var skyQualityRaw: Int = SkyQuality.suburb.rawValue
     @AppStorage("keepSubs") private var keepSubs: Bool = false
+    @AppStorage("autoFocusSweep") private var autoFocusSweep: Bool = true
     @State private var showGimbalSchool = false
 
     init() {}
@@ -103,6 +104,19 @@ struct SettingsView: View {
                             .font(Theme.headline)
                             .foregroundStyle(Theme.primaryText(night))
                         Text("Save every 1-second frame next to the finished stack for re-processing later. Roughly 2 GB per half hour.")
+                            .font(Theme.caption)
+                            .foregroundStyle(Theme.secondaryText(night))
+                    }
+                }
+                .tint(Theme.accent(night))
+            }
+            SFCard {
+                Toggle(isOn: $autoFocusSweep) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Auto focus sweep")
+                            .font(Theme.headline)
+                            .foregroundStyle(Theme.primaryText(night))
+                        Text("Before a star stack begins, StarFlow tries several lens positions near infinity and locks the sharpest — about half a minute. If no position clearly wins, it keeps the standard infinity focus. Skipped automatically when clouds or a starless view make it meaningless.")
                             .font(Theme.caption)
                             .foregroundStyle(Theme.secondaryText(night))
                     }

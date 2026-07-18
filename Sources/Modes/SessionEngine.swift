@@ -50,6 +50,23 @@ public struct SessionHooks {
     public var captureTilt: @MainActor () -> DeviceTilt = {
         GravityTiltProvider.shared.sampleTilt()
     }
+    /// Focus-sweep seams (see FocusSweep.swift), all declared with defaults so
+    /// the memberwise init keeps its signature:
+    ///  - `setLensPosition` moves the capture lens (1.0 = infinity end). Device
+    ///    builds drive the real AVCaptureDevice via `CaptureEngine`; the default
+    ///    is a no-op so injected test hooks stay minimal.
+    ///  - `focusScore` grades one frame's star sharpness (higher = sharper).
+    ///    The default runs the real variance-of-Laplacian metric; simulator
+    ///    builds override it with `FocusSweepSimulator` because synthetic
+    ///    frames never defocus.
+    ///  - `focusTelemetry` feeds the session's live focus chip (latest
+    ///    sharpness, rolling mean, drift alarm) once per captured sub.
+    public var setLensPosition: @MainActor (Float) async -> Void = { _ in }
+    public var focusScore: @MainActor (SubFrame) -> Double? = { frame in
+        frame.pixelData.flatMap { FocusMetric.sharpness(of: $0) }
+    }
+    public var focusTelemetry: @MainActor () -> (sharpness: Double?, mean: Double?, drifting: Bool)
+        = { (nil, nil, false) }
 
     public init(prepareCapture: @escaping (CaptureRecipe) async throws -> (width: Int, height: Int),
                 captureSub: @escaping (CaptureRecipe, Int) async throws -> SubFrame,
@@ -109,9 +126,17 @@ public extension SessionHooks {
                 try await Task.sleep(nanoseconds: UInt64(max(0, seconds) * 1_000_000_000))
             })
         hooks.isSimulatedCapture = true
+        // Simulator focus model: synthetic starfield frames never defocus, so a
+        // shared `FocusSweepSimulator` simulates the sharpness peak the sweep
+        // hunts for, and feeds the live focus chip through the same telemetry
+        // code path the device uses.
+        let focusSim = FocusSweepSimulator()
+        hooks.setLensPosition = { position in focusSim.setLens(Double(position)) }
+        hooks.focusScore = { _ in focusSim.score() }
+        hooks.focusTelemetry = { focusSim.tick() }
         return hooks
         #else
-        return SessionHooks(
+        var hooks = SessionHooks(
             prepareCapture: { recipe in
                 try await CaptureEngineBridge.prepare(recipe: recipe)
             },
@@ -135,6 +160,17 @@ public extension SessionHooks {
             sleep: { seconds in
                 try await Task.sleep(nanoseconds: UInt64(max(0, seconds) * 1_000_000_000))
             })
+        // Device focus seams: the sweep moves the REAL lens through the running
+        // capture engine, and the focus chip mirrors the telemetry the engine
+        // already computes off the hot path (no duplicate per-frame math).
+        hooks.setLensPosition = { position in
+            await CaptureEngine.shared.setLensPosition(position)
+        }
+        hooks.focusTelemetry = {
+            let engine = CaptureEngine.shared
+            return (engine.focusSharpness, engine.focusSharpnessMean, engine.focusDrifting)
+        }
+        return hooks
         #endif
     }
 
@@ -237,6 +273,15 @@ public final class SessionEngine: ObservableObject {
     /// per-frame star counts + background levels by `SkyConditionMonitor`.
     /// `.unknown` until enough starry frames establish a baseline.
     @Published public private(set) var skyCondition: SkyCondition = .unknown
+    /// Focus-sweep progress/verdict for this session (see FocusSweep.swift).
+    /// Stays `.inactive` for modes that never sweep (trails, timelapse).
+    @Published public private(set) var focusSweepStatus: FocusSweepStatus = .inactive
+    /// Live focus telemetry mirrored once per captured sub (device: the capture
+    /// engine's variance-of-Laplacian meter; simulator: the focus model).
+    /// Drives the session screen's focus chip and its drift warning.
+    @Published public private(set) var focusSharpness: Double?
+    @Published public private(set) var focusSharpnessMean: Double?
+    @Published public private(set) var focusDrifting = false
 
     // MARK: Published telemetry mirrors
 
@@ -269,6 +314,19 @@ public final class SessionEngine: ObservableObject {
     /// skipping saves the CPU for the moment the sky opens). Trails and
     /// timelapse styles are never gated — clouds are part of those shots.
     public var pauseStackingWhenCloudy = true
+
+    /// Defaulted engine setting: before a REGISTERED-stack session starts
+    /// stacking, sweep the lens through a ladder of positions near infinity and
+    /// lock the sharpest (see FocusSweep.swift). Skips itself gracefully under
+    /// clouds, starless frames (indoors), or a sharpness signal too weak to
+    /// trust — a skipped sweep never costs more than one probe frame. The
+    /// Settings toggle with the same name can veto it (defaults on).
+    public var autoFocusSweep = true
+
+    /// User-facing veto from Settings → Capture; unset means on.
+    private var focusSweepUserEnabled: Bool {
+        UserDefaults.standard.object(forKey: "autoFocusSweep") as? Bool ?? true
+    }
 
     private let mount: MountControlling
     /// Explicitly injected stacker (tests/previews). When present it is used for every
@@ -349,6 +407,10 @@ public final class SessionEngine: ObservableObject {
         noStarStreak = 0
         skyMonitor = SkyConditionMonitor()
         skyCondition = .unknown
+        focusSweepStatus = .inactive
+        focusSharpness = nil
+        focusSharpnessMean = nil
+        focusDrifting = false
         captureDims = (0, 0)
         netYawDeg = 0
         thermalBackoffSeconds = 0
@@ -631,7 +693,17 @@ public final class SessionEngine: ObservableObject {
         stats.captureTilt = hooks.captureTilt()
         captureDims = dims
         stacker.reset(width: dims.width, height: dims.height)
-        statusDetail = "Capturing…"
+
+        // Focus-sweep stage (between Calibrate and the capture loop): the
+        // camera is live and locked at infinity — try to do better than the
+        // hard stop before the first stacked frame. Never fatal; a skip or a
+        // flat curve just keeps the infinity lock.
+        try await focusSweepStage(shot: shot, recipe: recipe)
+
+        // Hold the sweep's verdict line ("Locked best focus." / a skip reason)
+        // for the first frame instead of instantly clobbering it — the per-sub
+        // counter takes over from the second frame anyway.
+        if case .inactive = focusSweepStatus { statusDetail = "Capturing…" }
 
         var index = 0
         while index < recipe.targetSubCount {
@@ -648,6 +720,7 @@ public final class SessionEngine: ObservableObject {
             }
 
             let frame = try await hooks.captureSub(recipe, index)
+            syncFocusTelemetry()
             // Cloud gate (defaulted engine setting): while the measured sky is
             // cloudy in a registered-stack session, keep capturing but skip the
             // accumulate — registration would only reject these frames. The
@@ -722,6 +795,102 @@ public final class SessionEngine: ObservableObject {
                 try await waitGap(gap, shot: shot)
             }
         }
+    }
+
+    // MARK: Focus sweep (between Calibrate and the capture loop)
+
+    /// Optional focus-sweep stage for registered star stacks: probe the sky,
+    /// then try a coarse→fine ladder of lens positions near infinity, score
+    /// each on live frames with the existing sharpness metric, and lock the
+    /// best (see FocusSweep.swift). Skips gracefully — never fails the session —
+    /// when the measured sky is cloudy/overexposed, the frame is starless
+    /// (indoors), or the sharpness signal is too weak to trust.
+    private func focusSweepStage(shot: ShotModeItem, recipe: CaptureRecipe) async throws {
+        guard autoFocusSweep, focusSweepUserEnabled,
+              shot.stackingStyle == .registered else { return }
+        let plan = FocusSweepPlan()
+        if skyCondition == .cloudy || skyCondition == .overexposed {
+            focusSweepStatus = .skipped(reason: "sky is \(skyCondition.displayName)")
+            statusDetail = "Focus sweep skipped — the sky is \(skyCondition.displayName) "
+                + "right now. Staying at the infinity lock."
+            return
+        }
+        statusDetail = "Focus check — reading the stars…"
+        do {
+            // Probe frame: the sweep is only worth 30-odd frames when there are
+            // actual stars to sharpen. The probe also feeds the sky monitor, so
+            // no exposure is wasted.
+            let probe = try await hooks.captureSub(recipe, 0)
+            observeSky(frame: probe, cpuStacker: nil, gated: pauseStackingWhenCloudy)
+            if let image = probe.pixelData,
+               let observation = SkyConditionMonitor.measure(image: image,
+                                                            width: captureDims.width,
+                                                            height: captureDims.height,
+                                                            at: probe.timestamp),
+               observation.starCount < plan.minProbeStars {
+                focusSweepStatus = .skipped(
+                    reason: "only \(observation.starCount) stars in frame")
+                statusDetail = "Focus sweep skipped — not enough stars to measure "
+                    + "(\(observation.starCount) in frame). Staying at the infinity lock."
+                return
+            }
+            guard let probeScore = hooks.focusScore(probe), probeScore > 0 else {
+                focusSweepStatus = .skipped(reason: "sharpness signal too weak")
+                statusDetail = "Focus sweep skipped — sharpness signal too weak to "
+                    + "trust. Staying at the infinity lock."
+                return
+            }
+            // "Up to" because the fine ladder only runs when the coarse pass
+            // finds a real peak — and the progress chip counts to the same
+            // planned total, so the two never disagree.
+            statusDetail = "Focus sweep: trying up to \(plan.plannedPositions) lens positions…"
+            let sweepHooks = self.hooks
+            let io = FocusSweep.IO(
+                setLens: { position in await sweepHooks.setLensPosition(Float(position)) },
+                captureFrame: { [weak self] in
+                    // The sweep is a ~half-minute stage outside the capture
+                    // loop's gateways: honor a background pause instead of
+                    // scoring pocket frames, and keep the gimbal awake (the
+                    // firmware inactivity timeout is shorter than the sweep).
+                    if let self {
+                        try await self.waitWhileSuspended()
+                        if shot.needsGimbal { await self.keepaliveIfIdle() }
+                    }
+                    return try await sweepHooks.captureSub(recipe, 0)
+                },
+                score: { frame in sweepHooks.focusScore(frame) },
+                onStep: { [weak self] step, planned in
+                    guard let self else { return }
+                    self.focusSweepStatus = .running(step: step, planned: planned)
+                    if step == plan.coarseSteps + 1 {
+                        self.statusDetail = "Focus sweep: refining near the peak…"
+                    }
+                })
+            let outcome = try await FocusSweep.run(plan: plan, io: io)
+            focusSweepStatus = .locked(position: outcome.position,
+                                       decisive: outcome.decisive)
+            statusDetail = outcome.decisive
+                ? "Locked best focus."
+                : "No clear focus peak — keeping the infinity lock."
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            // A capture hiccup during the sweep must not end the session:
+            // restore the infinity lock and continue — if capture is genuinely
+            // broken, the capture loop surfaces it loudly right after.
+            await hooks.setLensPosition(Float(plan.upperBound))
+            focusSweepStatus = .skipped(reason: "sweep interrupted")
+            statusDetail = "Focus sweep couldn't finish — continuing at the infinity lock."
+        }
+    }
+
+    /// Mirror the focus telemetry seam into the published chip values
+    /// (only writing on change, like the mount mirrors).
+    private func syncFocusTelemetry() {
+        let telemetry = hooks.focusTelemetry()
+        if focusSharpness != telemetry.sharpness { focusSharpness = telemetry.sharpness }
+        if focusSharpnessMean != telemetry.mean { focusSharpnessMean = telemetry.mean }
+        if focusDrifting != telemetry.drifting { focusDrifting = telemetry.drifting }
     }
 
     // MARK: Sky-condition monitoring

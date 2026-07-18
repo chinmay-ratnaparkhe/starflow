@@ -430,11 +430,87 @@ struct SessionView: View {
                     SFStatChip(symbol: "location.north.line", value: driftStatus(phase: phase), label: "drift")
                     SFStatChip(symbol: "arrow.triangle.2.circlepath", value: "\(stats.flapsRecovered)", label: "flaps")
                 }
+                focusRows(phase: phase, night: night)
                 Divider()
                     .overlay(Theme.secondaryText(night).opacity(0.2))
                 sourceTruthRows(stats: stats, phase: phase, night: night)
             }
         }
+    }
+
+    // MARK: - Focus chip (sweep progress + live sharpness meter)
+
+    /// Focus rows in the telemetry card. During the pre-capture focus sweep a
+    /// progress line narrates position N of M; once subs are flowing, a meter
+    /// shows the newest frame's star sharpness against the rolling mean — the
+    /// metric is relative (variance of Laplacian), so the bar, not a number,
+    /// is the honest display. A drift alarm warns when stars are softening
+    /// (focus creep, dew, a bumped lens).
+    @ViewBuilder
+    private func focusRows(phase: SessionPhase, night: Bool) -> some View {
+        if case .running(let step, let planned) = engine.focusSweepStatus {
+            HStack(spacing: 8) {
+                ProgressView()
+                    .controlSize(.small)
+                    .tint(Theme.accent(night))
+                Text("Focus sweep — position \(step) of \(planned)")
+                    .font(Theme.caption)
+                    .foregroundStyle(Theme.accent(night))
+                Spacer(minLength: 0)
+            }
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel("Focus sweep in progress, position \(step) of \(planned)")
+        }
+        if phase == .capture,
+           let sharpness = engine.focusSharpness,
+           let mean = engine.focusSharpnessMean, mean > 0 {
+            let drifting = engine.focusDrifting
+            // On-mean sharpness fills two-thirds of the bar; the drift alarm
+            // (30% below mean) lands just under half — visibly sagging.
+            let fraction = max(0.05, min(1.0, (sharpness / mean) / 1.5))
+            VStack(alignment: .leading, spacing: 4) {
+                HStack(spacing: 8) {
+                    Image(systemName: "camera.metering.spot")
+                        .font(.system(size: 11, weight: .semibold))
+                        .foregroundStyle(drifting ? Theme.warning(night) : Theme.accent(night))
+                    Text("focus")
+                        .font(Theme.label)
+                        .foregroundStyle(Theme.secondaryText(night))
+                    GeometryReader { geo in
+                        ZStack(alignment: .leading) {
+                            Capsule()
+                                .fill(Theme.secondaryText(night).opacity(0.18))
+                            Capsule()
+                                .fill(drifting ? Theme.warning(night) : Theme.positive(night))
+                                .frame(width: max(6, geo.size.width * fraction))
+                        }
+                    }
+                    .frame(height: 6)
+                }
+                if drifting {
+                    Text("Focus drifted — stars softening")
+                        .font(Theme.caption)
+                        .foregroundStyle(Theme.warning(night))
+                } else if case .locked(_, true) = engine.focusSweepStatus {
+                    Text("Best focus locked by the pre-capture sweep")
+                        .font(Theme.caption)
+                        .foregroundStyle(Theme.secondaryText(night))
+                }
+            }
+            .accessibilityElement(children: .ignore)
+            .accessibilityLabel(focusMeterAccessibilityLabel(drifting: drifting))
+        }
+    }
+
+    /// VoiceOver text for the focus meter — mirrors everything the sighted
+    /// captions say, including the sweep-lock note the `.ignore` element would
+    /// otherwise swallow.
+    private func focusMeterAccessibilityLabel(drifting: Bool) -> String {
+        if drifting { return "Focus warning: focus drifted, stars softening" }
+        if case .locked(_, true) = engine.focusSweepStatus {
+            return "Focus sharpness steady. Best focus locked by the pre-capture sweep."
+        }
+        return "Focus sharpness steady"
     }
 
     // MARK: - Source truth (camera + stacker)

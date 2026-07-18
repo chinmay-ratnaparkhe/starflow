@@ -424,6 +424,36 @@ public final class CaptureEngine: ObservableObject {
         return (appliedSeconds, appliedISO)
     }
 
+    /// Focus-sweep support: move the lens to `position` (0…1; 1.0 = the infinity
+    /// end this engine locks by default) and await the physical move. The
+    /// sequential capture loop keeps running — the exposure already in flight
+    /// spans the move (the sweep burns it as a settle frame, see
+    /// `FocusSweepPlan.settleFramesPerStep`); frames exposed after it see the
+    /// new position. No-op when the camera isn't configured or custom lens
+    /// positions are unsupported.
+    public func setLensPosition(_ position: Float) async {
+        guard let camera else { return }
+        let clamped = max(0, min(1, position))
+        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
+            sessionQueue.async {
+                guard camera.isLockingFocusWithCustomLensPositionSupported else {
+                    continuation.resume()
+                    return
+                }
+                do {
+                    try camera.lockForConfiguration()
+                } catch {
+                    continuation.resume()
+                    return
+                }
+                camera.setFocusModeLocked(lensPosition: clamped) { _ in
+                    continuation.resume()
+                }
+                camera.unlockForConfiguration()
+            }
+        }
+    }
+
     /// Issue one capture; the next one is chained from `didFinishCapture`.
     private func captureNext() {
         guard isRunning, !isPaused, !captureInFlight else { return }
