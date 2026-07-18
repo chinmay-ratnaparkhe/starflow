@@ -20,6 +20,9 @@ public struct TonightView: View {
     @State private var outlook: [OutlookNight] = []
     @State private var outlookDay: Date?
     @State private var outlookLocation: GeoLocation?
+    @State private var upcoming: [ScoredSkyEvent] = []
+    @State private var selectedEvent: ScoredSkyEvent?
+    @State private var pendingShotModeID: String?
 
     private let sky: SkyComputing = SkyEngine()
 
@@ -49,6 +52,10 @@ public struct TonightView: View {
                             }
                             SFSectionLabel("Tonight's shots")
                             shotList(ctx: ctx, night: night)
+                            if !upcoming.isEmpty {
+                                SFSectionLabel("Coming up")
+                                upcomingList
+                            }
                         } else {
                             LocationPromptCard(denied: locationProvider.denied) {
                                 locationProvider.requestAccess()
@@ -72,6 +79,22 @@ public struct TonightView: View {
         }
         .sheet(item: $activeShot) { shot in
             SessionView(shot: shot)
+        }
+        // Event detail sheet. Choosing its shot-mode link stashes the mode id and
+        // dismisses; the follow-up session sheet presents from onDismiss so the two
+        // sheets never fight over presentation.
+        .sheet(item: $selectedEvent, onDismiss: {
+            if let id = pendingShotModeID {
+                pendingShotModeID = nil
+                if let mode = ShotModeRegistry.mode(id: id) {
+                    activeShot = mode
+                }
+            }
+        }) { entry in
+            EventDetailSheet(entry: entry) { modeID in
+                pendingShotModeID = modeID
+                selectedEvent = nil
+            }
         }
     }
 
@@ -137,6 +160,16 @@ public struct TonightView: View {
         VStack(spacing: 14) {
             ForEach(rankedShots(ctx: ctx)) { entry in
                 shotCard(entry, night: night)
+            }
+        }
+    }
+
+    /// Next three catalog events (meteor showers, eclipses, supermoons, new-moon
+    /// Milky Way nights) as tappable cards — nearest first, honestly scored.
+    private var upcomingList: some View {
+        VStack(spacing: 14) {
+            ForEach(upcoming) { entry in
+                EventCard(entry: entry) { selectedEvent = entry }
             }
         }
     }
@@ -337,6 +370,7 @@ public struct TonightView: View {
             outlook = []
             outlookDay = nil
             outlookLocation = nil
+            upcoming = []
             return
         }
         let ctx = sky.skyContext(at: location, date: Date())
@@ -346,14 +380,29 @@ public struct TonightView: View {
         recomputeOutlookIfNeeded(location: location)
     }
 
-    /// The week-ahead strip only shifts once a day (or when the fix moves),
-    /// so skip the 7 × 24 h ephemeris scans on the minute tick.
+    /// The week-ahead strip and the event calendar only shift once a day (or when
+    /// the fix moves), so skip their ephemeris scans on the minute tick.
     private func recomputeOutlookIfNeeded(location: GeoLocation) {
         let today = Calendar.current.startOfDay(for: Date())
         guard outlook.isEmpty || outlookDay != today || outlookLocation != location else { return }
         outlook = OutlookNight.nextSeven(sky: sky, location: location, from: Date())
         outlookDay = today
         outlookLocation = location
+
+        // Offline event calendar: next 60 days, next 3 shown as cards. Query with a
+        // 24 h lookback so an event whose peak stamp (12:00 UT for showers) already
+        // passed today still covers tonight's observing night — both for the card
+        // and for the reminder scheduler, whose idempotent resync would otherwise
+        // remove tonight's pending 18:00 nudge as stale. The full list feeds the
+        // scheduler; the cards drop events more than ~4 h past their best moment.
+        let now = Date()
+        let events = EventCatalog().events(from: now.addingTimeInterval(-86_400),
+                                           days: 61, location: location)
+        upcoming = events
+            .filter { ($0.visibility.bestTime ?? $0.date) > now.addingTimeInterval(-4 * 3600) }
+            .prefix(3)
+            .map { ScoredSkyEvent(event: $0, rarity: RarityScorer.score(for: $0)) }
+        Task { await EventReminderService.shared.sync(events: events) }
     }
 
     /// Samples the core's altitude across tonight's darkness window (15-min steps)

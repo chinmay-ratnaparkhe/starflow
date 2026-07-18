@@ -6,9 +6,11 @@ import CoreLocation
 /// Settings tab: appearance, sky quality, capture prefs, gimbal, diagnostics, about.
 struct SettingsView: View {
     @ObservedObject private var appearance = Appearance.shared
+    @ObservedObject private var reminders = EventReminderService.shared
     @AppStorage("skyQuality") private var skyQualityRaw: Int = SkyQuality.suburb.rawValue
     @AppStorage("keepSubs") private var keepSubs: Bool = false
     @AppStorage("autoFocusSweep") private var autoFocusSweep: Bool = true
+    @AppStorage(EventReminderService.enabledDefaultsKey) private var eventReminders: Bool = false
     @State private var showGimbalSchool = false
 
     init() {}
@@ -22,6 +24,7 @@ struct SettingsView: View {
                     VStack(alignment: .leading, spacing: 22) {
                         appearanceSection(night)
                         skySection(night)
+                        alertsSection(night)
                         captureSection(night)
                         gimbalSection(night)
                         diagnosticsSection(night)
@@ -87,6 +90,49 @@ struct SettingsView: View {
                     .pickerStyle(.menu)
                     .tint(Theme.accent(night))
                     .labelsHidden()
+                }
+            }
+        }
+    }
+
+    // MARK: - Alerts
+
+    /// Event reminders: user-toggleable, permission-gated, honest about what fires.
+    /// The toggle round-trips through EventReminderService so iOS permission is
+    /// asked first and a denial flips the switch straight back.
+    private func alertsSection(_ night: Bool) -> some View {
+        VStack(alignment: .leading, spacing: 10) {
+            SFSectionLabel("Alerts")
+            SFCard {
+                VStack(alignment: .leading, spacing: 8) {
+                    Toggle(isOn: Binding(
+                        get: { eventReminders },
+                        set: { on in
+                            Task { @MainActor in
+                                eventReminders = await EventReminderService.shared.setEnabled(on)
+                            }
+                        })
+                    ) {
+                        VStack(alignment: .leading, spacing: 2) {
+                            Text("Event reminders")
+                                .font(Theme.headline)
+                                .foregroundStyle(Theme.primaryText(night))
+                            Text("An evening-of nudge for sky events worth chasing in the "
+                                 + "next 30 days — meteor-shower peaks, eclipses over your "
+                                 + "horizon, new-moon Milky Way nights. Computed offline "
+                                 + "from the built-in catalog; weather is yours to check.")
+                                .font(Theme.caption)
+                                .foregroundStyle(Theme.secondaryText(night))
+                        }
+                    }
+                    .tint(Theme.accent(night))
+                    if reminders.authorizationDenied {
+                        Text("Notifications are off for StarFlow in iOS Settings → "
+                             + "Notifications. Allow them there, then flip this on.")
+                            .font(Theme.caption)
+                            .foregroundStyle(Theme.warning(night))
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
                 }
             }
         }
