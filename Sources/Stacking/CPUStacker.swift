@@ -14,10 +14,15 @@ import Accelerate
 ///  4. Reject the frame if matched stars < 5 or RMS residual > 2 px (clouds, wild motion).
 ///  5. Accumulate a running mean with rotation-aware bilinear sampling; optional
 ///     kappa-sigma clipping (Welford mean + M2, clip at 3σ) suppresses satellites/planes.
-///  6. Preview: asinh-stretched 8-bit grayscale CGImage.
+///     The clip decision is made on LUMINANCE and applied to all three colour channels
+///     jointly, so a clipped satellite pixel never leaves a colour cast behind.
+///  6. Preview: colour CGImage, asinh-stretched per channel with the gain derived from
+///     luminance (the f(L)/L trick) so star colour survives the stretch.
 ///
-/// Honest scope: this is a monochrome luminance stack for live progress + landing-report
-/// preview. It is not a colour-calibrated final image.
+/// Colour model: detection and registration run on the same grayscale derivative as v1
+/// (bit-identical maths); RGB planes are ingested alongside and accumulated per channel.
+/// The result is a colour stack — still not a colour-CALIBRATED final image (no matrix,
+/// no white-balance fit), but real star colour instead of monochrome luminance.
 public final class CPUStacker: Stacking {
 
     // MARK: - Public support types
@@ -83,6 +88,9 @@ public final class CPUStacker: Stacking {
     private var meanBuf: [Float] = []
     private var m2Buf: [Float] = []
     private var countBuf: [Float] = []
+    private var meanR: [Float] = []
+    private var meanG: [Float] = []
+    private var meanB: [Float] = []
     private var referenceStars: [DetectedStar] = []
     private var acceptedCount = 0
     private var rejectedCount = 0
@@ -119,6 +127,9 @@ public final class CPUStacker: Stacking {
         meanBuf = [Float](repeating: 0, count: count)
         m2Buf = [Float](repeating: 0, count: count)
         countBuf = [Float](repeating: 0, count: count)
+        meanR = [Float](repeating: 0, count: count)
+        meanG = [Float](repeating: 0, count: count)
+        meanB = [Float](repeating: 0, count: count)
         referenceStars = []
         acceptedCount = 0
         rejectedCount = 0
