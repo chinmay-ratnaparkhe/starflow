@@ -8,8 +8,8 @@ GOALS: (G1) First clear-night Milky Way image that wows. (G2) Zero-hands session
 | 1 | Sky-condition detection: cloud detector from live frames (star-count + background trend — star detection exists), city/Bortle sanity from measured sky background; Tonight verdict + in-session advice ("clouds — pause?") | basic honesty | CERTIFIED 2x-green |
 | 2 | Focus assist: star-FWHM live meter + tap-to-refocus sweep | sharp stars = everything | CERTIFIED 2x-green |
 | 3 | Milky Way session polish: exposure auto-tune from measured sky, framing guidance overlay (core position in FOV), live depth meter, cloud-time budget fix (skips extend the session, capped 2×) | THE core experience | CERTIFIED 2x-green |
-| 4 | Plate-solve core: triangle-hash matcher + bright-star DB, tele-crop first | MATH via deep-research | building |
-| 5 | Plate-solve GoTo: slew→shoot→solve→correct (0.25°) | crown jewel; perfects MW aim | |
+| 4 | Plate-solve core: triangle-hash matcher + bright-star DB, tele-crop first | MATH via deep-research | CERTIFIED 2x-green |
+| 5 | Plate-solve GoTo: slew→shoot→solve→correct (0.25°) | crown jewel; perfects MW aim | building |
 | 6 | Star-color calibration (SPCC-lite) | | |
 | 7 | Offline event calendar + rarity alerts (clean-room data) | | |
 | 8 | Timelapse video export | assembler exists | |
