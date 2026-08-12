@@ -1374,26 +1374,36 @@ final class AutoTestRunner: ObservableObject {
             }
             if !isDocked(mount.connection) { samplesUndocked += 1 }
 
-            let row = [
-                String(format: "%.0f", elapsed),
-                engine.phase.rawValue,
-                "\(stats.subsAccepted)", "\(stats.subsRejected)",
-                "\(stats.subsSkippedClouds)", "\(stats.subsLostToClouds)",
-                String(format: "%.1f", stats.integrationSeconds),
-                Self.thermalString(thermal),
-                battery.map { String($0) } ?? "",
-                freeMB.map { String($0) } ?? "",
-                memory.map { String(format: "%.1f", $0) } ?? "",
-                String(format: "%.2f", cumulativeFPM),
-                String(format: "%.2f", intervalFPM),
-                connectionString(mount.connection),
-                String(describing: mount.authority),
-                mount.telemetry?.batteryPercent.map { String($0) } ?? "",
-                "\(stats.lastStarCount)", "\(stats.peakStarCount)",
-                engine.skyCondition.rawValue,
-                (engine.interruption.map { String(describing: $0) } ?? "none")
-                    .replacingOccurrences(of: ",", with: ";"),
-            ].joined(separator: ",")
+            // NOTE: built incrementally — a single large array literal of mixed
+            // string expressions blows the Swift type-checker's time budget.
+            var cols: [String] = []
+            cols.append(String(format: "%.0f", elapsed))
+            cols.append(engine.phase.rawValue)
+            cols.append(String(stats.subsAccepted))
+            cols.append(String(stats.subsRejected))
+            cols.append(String(stats.subsSkippedClouds))
+            cols.append(String(stats.subsLostToClouds))
+            cols.append(String(format: "%.1f", stats.integrationSeconds))
+            cols.append(Self.thermalString(thermal))
+            let batteryCol: String = battery.map { String($0) } ?? ""
+            cols.append(batteryCol)
+            let freeCol: String = freeMB.map { String($0) } ?? ""
+            cols.append(freeCol)
+            let memCol: String = memory.map { String(format: "%.1f", $0) } ?? ""
+            cols.append(memCol)
+            cols.append(String(format: "%.2f", cumulativeFPM))
+            cols.append(String(format: "%.2f", intervalFPM))
+            cols.append(connectionString(mount.connection))
+            cols.append(String(describing: mount.authority))
+            let gimbalBatteryCol: String = mount.telemetry?.batteryPercent.map { String($0) } ?? ""
+            cols.append(gimbalBatteryCol)
+            cols.append(String(stats.lastStarCount))
+            cols.append(String(stats.peakStarCount))
+            cols.append(engine.skyCondition.rawValue)
+            let interruptionCol: String = (engine.interruption.map { String(describing: $0) } ?? "none")
+                .replacingOccurrences(of: ",", with: ";")
+            cols.append(interruptionCol)
+            let row = cols.joined(separator: ",")
             csv += row + "\n"
             try? csv.write(to: csvURL, atomically: true, encoding: .utf8)
             samples += 1
