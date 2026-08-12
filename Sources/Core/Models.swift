@@ -223,11 +223,29 @@ public struct CaptureRecipe: Sendable {
     public var targetSubCount: Int
     public var nudgeTracking: Bool         // step-and-shoot framing retention on
     public var intervalSeconds: Double     // 0 = back-to-back
+    /// Optional WALL-CLOCK stop: the capture loop ends at this instant even when
+    /// the planned sub count is unfinished. Field nights are governed by clock
+    /// windows (the galactic core sets, twilight starts, you have to drive home)
+    /// far more often than by frame counts, so this is an *additional* stop
+    /// condition alongside `targetSubCount` — whichever lands first wins. It can
+    /// never extend a session. Appended field, defaulted `nil` so every
+    /// pre-existing call site keeps compiling and every mode's recipe still
+    /// means exactly what it meant before.
+    public var stopAt: Date?
     public init(exposureSeconds: Double, iso: Double, targetSubCount: Int,
-                nudgeTracking: Bool, intervalSeconds: Double = 0) {
+                nudgeTracking: Bool, intervalSeconds: Double = 0,
+                stopAt: Date? = nil) {
         self.exposureSeconds = min(exposureSeconds, 1.0)
         self.iso = iso; self.targetSubCount = targetSubCount
         self.nudgeTracking = nudgeTracking; self.intervalSeconds = intervalSeconds
+        self.stopAt = stopAt
+    }
+
+    /// Seconds of wall clock left before `stopAt`, measured from `now`.
+    /// Nil when no deadline is set; never negative.
+    public func secondsUntilStop(from now: Date) -> TimeInterval? {
+        guard let stopAt else { return nil }
+        return max(0, stopAt.timeIntervalSince(now))
     }
 }
 
@@ -313,5 +331,37 @@ public struct SessionStats: Sendable {
     /// Set ONLY from a real `ColorCalibrator` result; never invented.
     /// Appended field with a default so the empty init keeps its meaning.
     public var calibrationStars: Int = 0
+    /// Star count measured on the most recently OBSERVED frame, and the best
+    /// count this session has ever seen (`SkyConditionMonitor` observations —
+    /// the same numbers that grade the sky). 0 means "nothing measured yet",
+    /// never "no stars": a session with no decodable frames leaves both at 0.
+    /// Appended diagnostics (the AutoTest harness reports them); nothing in the
+    /// state machine reads them. Defaults keep the empty init's meaning.
+    public var lastStarCount: Int = 0
+    public var peakStarCount: Int = 0
+    /// Plate-solve GoTo outcome for this session (feature 5): how many acquires
+    /// succeeded, the final measured pointing error of the LAST successful one
+    /// (deg, nil when none succeeded), a one-line human verdict, and the drift
+    /// measured by the most recent mid-session cross-check. Appended
+    /// diagnostics with defaults so the empty init keeps its meaning.
+    public var goToAcquires: Int = 0
+    public var goToFinalErrorDeg: Double?
+    public var goToOutcome: String = "not attempted"
+    public var lastDriftDeg: Double?
+    /// Compass-coarse Aim Assist verdict for this session (Aim phase). Appended
+    /// diagnostic with a default so the empty init keeps its meaning.
+    public var aimAssistOutcome: String = "not attempted"
+    /// True when the capture loop finished because the recipe's wall-clock
+    /// `stopAt` arrived rather than because the planned subs were shot. The
+    /// landing report says so, so a session that stops "short" of its sub count
+    /// reads as the deliberate finish it was. Appended field with a default so
+    /// the empty init keeps its meaning.
+    public var stoppedOnClock: Bool = false
+    /// Predicted alt-az FIELD-rotation rate handed to the stacker for this session
+    /// (deg/hour, signed; positive = counter-clockwise). Nil when no rate could be
+    /// computed (no location fix, no celestial target, unregistered stack) — the
+    /// stacker then falls back to its rotation search and reference re-baselining.
+    /// Appended diagnostic with a default so the empty init keeps its meaning.
+    public var fieldRotationDegPerHour: Double?
     public init() {}
 }

@@ -19,8 +19,10 @@ import CoreGraphics
 ///  - City (Bortle 8–9): skyglow already pushes the histogram right, so expose-right
 ///    at LOW gain — keep the full shutter and cut ISO (never above 800) so the glow
 ///    doesn't clip and stars stay separable from the orange wash.
-///  - Dark site (Bortle 1–2): sky-noise-limited recipes ride at ISO 3200+ so faint
-///    signal swamps read noise; stacking averages the extra shot noise back down.
+///  - Dark site (Bortle 1–2): dim-sky recipes ride at the ISO 3200 FLOOR — enough
+///    gain to clear the sensor's read noise, and not one stop more. A 1 s sub at a
+///    dark site is read-noise dominated, so past that point extra gain buys no
+///    noise improvement and only clips star cores. Depth comes from more subs.
 ///  - Target-lit shots (Moon, city lights — base ISO ≤ 200) don't care about sky
 ///    quality: their subject provides the photons. They pass through unchanged.
 public enum ExposurePlanner {
@@ -46,7 +48,10 @@ public enum ExposurePlanner {
     /// Base ISO at/above which a recipe counts as sky-noise-limited and picks up the
     /// dark-site floor below.
     public static let dimSkyBaseISO: Double = 1600
-    /// Dark sites run dim-sky recipes at ISO 3200+ (read noise must not dominate).
+    /// Dark sites run dim-sky recipes at ISO 3200 — the floor where read noise stops
+    /// dominating a 1 s sub. It is a floor, not a target: `isoScale` deliberately
+    /// leaves dark-site gain at 1.0 so a recipe already at or above 3200 is passed
+    /// through untouched rather than pushed into clipping.
     public static let darkSiteISOFloor: Double = 3200
 
     /// Pure planning: base recipe + sky quality → exposure/ISO + rationale.
@@ -68,13 +73,14 @@ public enum ExposurePlanner {
     }
 
     /// Convenience: the base recipe with the planned exposure/ISO swapped in
-    /// (sub count, tracking, and cadence are untouched).
+    /// (sub count, tracking, cadence, and any wall-clock stop are untouched).
     public static func adjustedRecipe(base: CaptureRecipe, quality: SkyQuality) -> CaptureRecipe {
         let p = plan(base: base, quality: quality)
         return CaptureRecipe(exposureSeconds: p.exposureSeconds, iso: p.iso,
                              targetSubCount: base.targetSubCount,
                              nudgeTracking: base.nudgeTracking,
-                             intervalSeconds: base.intervalSeconds)
+                             intervalSeconds: base.intervalSeconds,
+                             stopAt: base.stopAt)
     }
 
     // MARK: Mid-session refinement (MEASURED sky background)
@@ -114,12 +120,23 @@ public enum ExposurePlanner {
                     note: "Sky measured — \(reason), tuning to ISO \(Int(iso)).")
     }
 
+    /// Gain multiplier applied to a dim-sky base recipe for the user's sky.
+    ///
+    /// City/suburb scale DOWN because skyglow supplies unwanted photons that would
+    /// clip at native gain. A dark site does NOT scale up. At 1 s subs under a
+    /// Bortle 1–2 sky the frame collects on the order of 2 e-/s of sky — the
+    /// exposure is READ-NOISE dominated, not sky-limited. Past the sensor's
+    /// read-noise flattening point extra analog gain adds no information: it
+    /// cannot lower the noise floor it has already flattened, and every stop
+    /// costs a stop of headroom, so the only measurable effect is clipping star
+    /// cores to white blobs. The floor is what matters at a dark site, and
+    /// `darkSiteISOFloor` (3200) already enforces it in `plan` via `max(iso, …)`.
     private static func isoScale(for quality: SkyQuality) -> Double {
         switch quality {
         case .city: return 0.25
         case .suburb: return 0.5
         case .rural: return 1.0
-        case .dark: return 2.0
+        case .dark: return 1.0
         }
     }
 
@@ -128,7 +145,8 @@ public enum ExposurePlanner {
         case .city: return "City skyglow: exposing right at low gain so the glow doesn't clip."
         case .suburb: return "Suburban glow: gain halved to protect the highlights."
         case .rural: return "Rural sky: the mode's native recipe."
-        case .dark: return "Dark site: high gain so faint sky signal swamps read noise."
+        case .dark: return "Dark site: gain held at the read-noise floor — more gain would only "
+            + "clip star cores. Depth comes from more subs, not more ISO."
         }
     }
 }
@@ -241,10 +259,33 @@ public enum StorageBudget {
     /// Warn when free space is under planned × this factor + the reserve.
     public static let warnHeadroomFactor: Double = 1.25
 
-    /// Bytes each captured sub will cost on disk. "Keep RAW subs" (Settings) persists
-    /// the Bayer RAW + processed pair; otherwise subs live only in the in-memory stack.
+    /// Bytes each captured sub will cost on disk. "Keep RAW subs" persists the
+    /// Bayer RAW + processed pair; otherwise subs live only in the in-memory stack.
     public static func estimatedBytesPerFrame(recipe: CaptureRecipe, keepingSubs: Bool) -> Int64 {
         keepingSubs ? hevcBytesPerFrame + bayerRawBytesPerFrame : transientBytesPerFrame
+    }
+
+    /// Whether this build actually WRITES per-sub files. Today it does not:
+    /// `CaptureEngine` stacks the processed frame and drops it (RAW persistence is
+    /// a later round), so nothing lands on disk per sub beyond the transient
+    /// working footprint.
+    ///
+    /// This existed as a `keepSubs` user default that the pre-flight believed:
+    /// it budgeted 30.5 MB per frame for files that were never written, so a long
+    /// plan demanded tens of GB and `verdict` returned `.refuse` — the session
+    /// refused to start while saving nothing. The estimate must describe what the
+    /// code does, not what a setting claims. Flip this to `true` in the same
+    /// commit that lands real sub persistence, and the toggle in Settings comes
+    /// back with it.
+    public static let subRetentionImplemented = false
+
+    /// The effective "keep subs" answer for pre-flight math: the user's setting
+    /// AND a build that can actually honour it. Single source of truth for every
+    /// call site, so the budget can never again refuse a session over files
+    /// nothing writes.
+    public static func retainsSubsOnDisk(
+        defaults: UserDefaults = .standard) -> Bool {
+        subRetentionImplemented && defaults.bool(forKey: "keepSubs")
     }
 
     /// Total bytes the session plan is expected to write.

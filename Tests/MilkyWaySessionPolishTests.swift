@@ -243,9 +243,15 @@ private struct PolishTestTimeout: Error {}
 @MainActor
 final class ExposureRefinementIntegrationTests: XCTestCase {
 
-    /// A session whose frames MEASURE a sky background near saturation must
-    /// drop ISO one stop after the first few frames — exactly once — while the
-    /// shutter and plan shape stay untouched.
+    /// With the mid-session refinement explicitly OPTED IN, a session whose
+    /// frames MEASURE a sky background near saturation drops ISO one stop after
+    /// the first few frames — exactly once — while the shutter and plan shape
+    /// stay untouched.
+    ///
+    /// The opt-in is the point: refinement is off by default (see
+    /// `testRegisteredStacksHoldTheirISOByDefault`), because changing gain
+    /// mid-integration splits a stack into two populations. This test covers the
+    /// mechanism for the user who deliberately turns it on.
     func testMeasuredBrightSkyDropsISOOnceMidSession() async throws {
         let side = 64
         let bright = Self.flatGrayImage(side: side, gray: 0.25)
@@ -270,6 +276,7 @@ final class ExposureRefinementIntegrationTests: XCTestCase {
         let engine = SessionEngine(mount: PolishMockMount(),
                                    stacker: PolishMockStacker(), hooks: hooks)
         engine.autoFocusSweep = false   // isolate the capture loop's refinement
+        engine.midSessionISORefine = true   // the user opted in
         let shot = ShotModeItem(
             id: "refine", name: "Refine Shot", tagline: "test", symbol: "star",
             recipe: CaptureRecipe(exposureSeconds: 1.0, iso: 800, targetSubCount: 12,
@@ -324,6 +331,7 @@ final class ExposureRefinementIntegrationTests: XCTestCase {
         let engine = SessionEngine(mount: PolishMockMount(),
                                    stacker: PolishMockStacker(), hooks: hooks)
         engine.autoFocusSweep = false
+        engine.midSessionISORefine = true   // even opted in, trails never tune
         let shot = ShotModeItem(
             id: "trailsrefine", name: "Trails Shot", tagline: "test", symbol: "star",
             recipe: CaptureRecipe(exposureSeconds: 1.0, iso: 400, targetSubCount: 10,

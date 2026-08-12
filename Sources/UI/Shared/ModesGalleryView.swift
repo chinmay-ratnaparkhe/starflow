@@ -160,6 +160,11 @@ private struct ModeDetailSheet: View {
     let feasibility: Feasibility?
     @State private var sessionShot: ShotModeItem?
     @State private var checkedSteps: Set<Int> = []
+    /// Index into `SessionStopChoice.minuteOptions` — the optional wall-clock
+    /// stop for THIS session (0 = none). Deliberately per-sheet state, not a
+    /// stored preference: a deadline means "tonight, from now", and a stale one
+    /// silently truncating next week's session would be worse than no feature.
+    @State private var stopChoiceIndex = 0
     /// 24/30 fps choice for the timelapse clip (feature 8) — read by the
     /// session engine at assembly time via `TimelapseFramePolicy.userFPS()`.
     @AppStorage(TimelapseFramePolicy.fpsDefaultsKey)
@@ -192,6 +197,8 @@ private struct ModeDetailSheet: View {
                             SFSectionLabel("Timelapse clip")
                             timelapseExportCard(night: night)
                         }
+                        SFSectionLabel("Stop time")
+                        stopTimeCard(night: night)
                         SFSectionLabel("How it works")
                         tutorialCard(steps: item.tutorial, night: night)
                         if !item.checklist.isEmpty {
@@ -316,6 +323,66 @@ private struct ModeDetailSheet: View {
         }
     }
 
+    /// Optional wall-clock stop for this session. Field nights run on clock
+    /// windows — the core sets, twilight starts, the drive home is long — so
+    /// this ends capture at a chosen time even if the sub count is unfinished.
+    /// It can only shorten a session, never extend one, and everything already
+    /// stacked is developed exactly as usual.
+    private func stopTimeCard(night: Bool) -> some View {
+        let options = SessionStopChoice.minuteOptions
+        let index = min(max(stopChoiceIndex, 0), options.count - 1)
+        let minutes = options[index]
+        // The planned run at this recipe, for an honest "shorter than the plan"
+        // note. Uses the shot-to-shot floor, not the shutter: exposure × subs
+        // reads "about 1 s" for a 150-frame lunar plan, which is not a duration
+        // anybody can act on. See `SessionStopChoice.estimatedWallSeconds`.
+        let plannedSeconds = SessionStopChoice.estimatedWallSeconds(recipe: item.recipe)
+        return SFCard {
+            VStack(alignment: .leading, spacing: 10) {
+                Stepper(value: $stopChoiceIndex, in: 0...(options.count - 1)) {
+                    HStack {
+                        Text("Stop after")
+                            .font(Theme.headline)
+                            .foregroundStyle(Theme.primaryText(night))
+                        Spacer()
+                        Text(SessionStopChoice.label(minutes: minutes))
+                            .font(Theme.headline)
+                            .foregroundStyle(Theme.accent(night))
+                            .monospacedDigit()
+                    }
+                }
+                .tint(Theme.accent(night))
+                .accessibilityLabel("Stop after")
+                .accessibilityValue(minutes > 0
+                                    ? "\(minutes) minutes from the start"
+                                    : "No stop time")
+                Text(stopExplanation(minutes: minutes, plannedSeconds: plannedSeconds))
+                    .font(Theme.caption)
+                    .foregroundStyle(Theme.secondaryText(night))
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+        }
+    }
+
+    private func stopExplanation(minutes: Int, plannedSeconds: Double) -> String {
+        guard minutes > 0 else {
+            return "No stop time: the session runs its full plan of "
+                + "\(item.recipe.targetSubCount) subs — at least "
+                + "\(TonightFormat.duration(plannedSeconds)), longer if the phone warms "
+                + "up and spaces frames out — unless you stop it. Set one if the sky, "
+                + "the twilight, or your drive home has a deadline."
+        }
+        var line = "Capture ends \(minutes) minutes after you tap Start — the clock "
+            + "runs from the tap, not from the first frame, so framing and focus come "
+            + "out of the window — and develops whatever is stacked by then."
+        if Double(minutes) * 60 < plannedSeconds {
+            line += " That's shorter than this mode's full plan "
+                + "(at least \(TonightFormat.duration(plannedSeconds))), so expect fewer "
+                + "subs and a shallower stack — an honest trade, not a failure."
+        }
+        return line
+    }
+
     private func requirementTags(night: Bool) -> some View {
         HStack(spacing: 8) {
             ModeTag(symbol: item.cityViable ? "building.2" : "moon.stars",
@@ -406,7 +473,11 @@ private struct ModeDetailSheet: View {
 
     private func startButton(night: Bool) -> some View {
         Button {
-            sessionShot = item
+            // The deadline is measured from THIS moment — the session starts as
+            // soon as the sheet presents, so "45 min from now" means what it says.
+            let options = SessionStopChoice.minuteOptions
+            let minutes = options[min(max(stopChoiceIndex, 0), options.count - 1)]
+            sessionShot = item.stopping(afterMinutes: minutes)
         } label: {
             HStack(spacing: 8) {
                 Image(systemName: "play.fill")

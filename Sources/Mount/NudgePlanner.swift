@@ -42,6 +42,47 @@ public enum NudgePlanner {
         return DriftRates(altDegPerSec: dAlt, azDegPerSec: dAz)
     }
 
+    // MARK: Field rotation (alt-az mounts rotate the FIELD, not just its position)
+
+    /// Altitude clamp for the field-rotation formula: the true rate diverges at the
+    /// zenith, and a bounded finite number is the useful answer for a seed hint.
+    public static let maxFieldRotationAltDeg: Double = 85.0
+
+    /// Instantaneous field-rotation rate of an alt-az mount, in **deg/hour**.
+    ///
+    ///     R = 15.04 · cos(lat) · cos(Az) / cos(Alt)
+    ///
+    /// (15.04 deg/hr is the sidereal rate; azimuth 0 = N, 90 = E.) The Flow 2 Pro is an
+    /// alt-az head, so even perfectly tracked framing rotates about the optical axis:
+    /// at Hurricane Ridge (lat 47.97) with the Milky Way core low in the south
+    /// (az ≈ 190, alt ≈ 11) this is ≈ 10 deg/hr — 1° of field rotation every 6 minutes,
+    /// which is exactly what breaks a translation-only stacking registration.
+    /// `CPUStacker` uses it to pre-rotate each frame before its offset vote.
+    ///
+    /// The altitude is clamped to ±`maxFieldRotationAltDeg` before the cosine so a
+    /// near-zenith target cannot divide by ~0 and return an absurd rate.
+    /// Sign convention: positive = counter-clockwise on the sky. The stacker treats the
+    /// seed as a *hint* and searches both signs, so a handedness mismatch between sky
+    /// coordinates and sensor pixels costs one extra search step, never a lost frame.
+    public static func fieldRotationRateDegPerHour(altDeg: Double,
+                                                   azDeg: Double,
+                                                   latitudeDeg: Double) -> Double {
+        let lat = latitudeDeg * .pi / 180.0
+        let az = azDeg * .pi / 180.0
+        let clampedAlt = min(max(altDeg, -maxFieldRotationAltDeg), maxFieldRotationAltDeg)
+        let alt = clampedAlt * .pi / 180.0
+        let cosAlt = max(cos(alt), 1e-6)      // belt-and-braces after the clamp
+        return 15.04 * cos(lat) * cos(az) / cosAlt
+    }
+
+    /// Same rate in deg/second — the unit `CPUStacker.setExpectedRotationRate` wants.
+    public static func fieldRotationRateDegPerSecond(altDeg: Double,
+                                                     azDeg: Double,
+                                                     latitudeDeg: Double) -> Double {
+        fieldRotationRateDegPerHour(altDeg: altDeg, azDeg: azDeg,
+                                    latitudeDeg: latitudeDeg) / 3600.0
+    }
+
     // MARK: Nudge decision
 
     /// Nudge when the accumulated drift has reached the target step size, or when the

@@ -8,8 +8,11 @@ struct SettingsView: View {
     @ObservedObject private var appearance = Appearance.shared
     @ObservedObject private var reminders = EventReminderService.shared
     @AppStorage("skyQuality") private var skyQualityRaw: Int = SkyQuality.suburb.rawValue
-    @AppStorage("keepSubs") private var keepSubs: Bool = false
     @AppStorage("autoFocusSweep") private var autoFocusSweep: Bool = true
+    /// Mid-session ISO refinement opt-in — see `SessionEngine.midSessionISORefine`.
+    /// Defaults OFF: a stack should be one exposure from first frame to last.
+    @AppStorage(SessionEngine.midSessionISODefaultsKey)
+    private var midSessionISO: Bool = false
     @AppStorage(EventReminderService.enabledDefaultsKey) private var eventReminders: Bool = false
     @State private var showGimbalSchool = false
 
@@ -143,15 +146,50 @@ struct SettingsView: View {
     private func captureSection(_ night: Bool) -> some View {
         VStack(alignment: .leading, spacing: 10) {
             SFSectionLabel("Capture")
+            // "Keep RAW subs" is presented as the unavailable feature it is.
+            // It used to be a live toggle, but nothing in this build writes
+            // per-sub files (the capture engine stacks the processed frame and
+            // drops it) — while the storage pre-flight believed the switch and
+            // budgeted ~30 MB per frame, so turning it on could make a long
+            // session refuse to start over bytes that were never written. A
+            // disabled row with honest copy is the truthful state until real
+            // sub persistence ships.
             SFCard {
-                Toggle(isOn: $keepSubs) {
+                Toggle(isOn: .constant(false)) {
                     VStack(alignment: .leading, spacing: 2) {
                         Text("Keep RAW subs")
                             .font(Theme.headline)
-                            .foregroundStyle(Theme.primaryText(night))
-                        Text("Save every 1-second frame next to the finished stack for re-processing later. Roughly 2 GB per half hour.")
+                            .foregroundStyle(Theme.secondaryText(night))
+                        Text("Not in this build. StarFlow stacks each 1-second frame and "
+                             + "releases it — only the finished stack is written to disk, so "
+                             + "there is nothing to keep yet. Saving every sub for "
+                             + "re-processing is planned for a later update.")
                             .font(Theme.caption)
                             .foregroundStyle(Theme.secondaryText(night))
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
+                }
+                .tint(Theme.accent(night))
+                .disabled(true)
+                .accessibilityHint("Unavailable in this build.")
+            }
+            SFCard {
+                Toggle(isOn: $midSessionISO) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Tune ISO mid-session")
+                            .font(Theme.headline)
+                            .foregroundStyle(Theme.primaryText(night))
+                        Text("Off by default, and best left off. Once the first frames have "
+                             + "measured the real sky, this lets a star stack change gain one "
+                             + "stop part-way through. That splits the result into two "
+                             + "populations with different noise and different star-core "
+                             + "clipping, which nothing downstream can separate — and under "
+                             + "genuinely dark skies the \"sky is darker than planned\" trigger "
+                             + "fires on a perfectly correct exposure. Depth comes from more "
+                             + "subs, not more ISO.")
+                            .font(Theme.caption)
+                            .foregroundStyle(Theme.secondaryText(night))
+                            .fixedSize(horizontal: false, vertical: true)
                     }
                 }
                 .tint(Theme.accent(night))

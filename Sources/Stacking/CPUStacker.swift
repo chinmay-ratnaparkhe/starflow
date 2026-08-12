@@ -52,6 +52,27 @@ public final class CPUStacker: Stacking {
             (cosT * x - sinT * y + tx, sinT * x + cosT * y + ty)
         }
         public var rotationDegrees: Double { atan2(sinT, cosT) * 180 / .pi }
+
+        /// `outer ∘ inner`: apply `inner` first, then `outer`.
+        /// Used to keep a re-baselined reference producing ORIGINAL-grid output, and to
+        /// fold a predicted seed rotation back into a fit made in de-rotated coordinates.
+        public static func compose(outer: SimilarityTransform,
+                                   inner: SimilarityTransform) -> SimilarityTransform {
+            SimilarityTransform(
+                cosT: outer.cosT * inner.cosT - outer.sinT * inner.sinT,
+                sinT: outer.sinT * inner.cosT + outer.cosT * inner.sinT,
+                tx: outer.cosT * inner.tx - outer.sinT * inner.ty + outer.tx,
+                ty: outer.sinT * inner.tx + outer.cosT * inner.ty + outer.ty)
+        }
+
+        /// Rotation by `radians` about `center` (x right, y down).
+        public static func rotation(radians: Double,
+                                    about center: (x: Double, y: Double)) -> SimilarityTransform {
+            let c = cos(radians), s = sin(radians)
+            return SimilarityTransform(cosT: c, sinT: s,
+                                       tx: center.x - (c * center.x - s * center.y),
+                                       ty: center.y - (s * center.x + c * center.y))
+        }
     }
 
     public struct MatchPair: Sendable {
@@ -76,12 +97,40 @@ public final class CPUStacker: Stacking {
     private let coarseMatchTolerancePx = 8.0   // translation-only pass (absorbs ≤1° rotation)
     private let fineMatchTolerancePx = 2.5     // after similarity fit
 
+    // Rotation handling (alt-az field rotation — see `expectedRotationRateDegPerSec`).
+    /// Half-width of the seed-rotation ladder searched when the predicted seed does not
+    /// already produce a confident match (deg). ±10° covers a wrong-signed prediction
+    /// plus a full re-baselining interval of drift.
+    static let rotationSearchWindowDeg = 10.0
+    /// Ladder step (deg). 0.5° keeps the residual rotation under the 3 px offset-vote
+    /// tolerance out to ~340 px from the frame centre.
+    static let rotationSearchStepDeg = 0.5
+    /// A seed that matches at least this many stars is accepted immediately — the very
+    /// first ladder entry is the un-searched, historical code path, so frames that
+    /// register today still register through exactly the same maths.
+    private var rotationSearchSatisfiedMatches: Int { minMatches * 2 }
+    /// Re-baseline the reference star list once the accepted-frame rotation exceeds this.
+    static let rebaselineRotationDeg = 2.0
+    /// …or once the match count falls below this multiple of `minMatches`.
+    private var rebaselineMatchFloor: Int { minMatches * 2 }
+    /// Predicted seed angles are clamped here (deg): past this the prediction is
+    /// extrapolation, and the ladder plus the always-present zero seed do better.
+    static let maxPredictedRotationDeg = 30.0
+    /// Never re-baseline twice inside this many accepted frames: each re-baseline folds
+    /// one fit's residual into the accumulated transform, so a thrashing reference would
+    /// random-walk the output grid.
+    static let rebaselineCooldownFrames = 2
+
     /// Kappa for sigma clipping; nil = plain running mean.
     private let kappaSigma: Double?
 
     /// False = never attempt star registration: every decodable frame joins a plain
     /// unregistered running mean (timelapse). Fixed at init.
     private let registrationEnabled: Bool
+
+    /// False = only ever try the predicted seed rotation (no ladder search). Fixed at
+    /// init; on by design — it is what rescues a session with no location fix.
+    private let rotationSearchEnabled: Bool
 
     // MARK: - State
 
@@ -95,6 +144,15 @@ public final class CPUStacker: Stacking {
     private var meanG: [Float] = []
     private var meanB: [Float] = []
     private var referenceStars: [DetectedStar] = []
+    /// Maps ORIGINAL output-grid coordinates (the seed frame's grid) into the coordinates
+    /// of whatever frame currently supplies `referenceStars`. Identity until the first
+    /// re-baseline; every accepted frame's transform is composed onto it, so the stacked
+    /// image never leaves the grid the first frame established.
+    private var baseTransform: SimilarityTransform = .identity
+    /// Timestamp of the frame that currently supplies `referenceStars` — the epoch the
+    /// predicted rotation angle is measured from (it moves with every re-baseline).
+    private var referenceTimestamp: Date?
+    private var lastRebaselineAcceptedCount = 0
     private var acceptedCount = 0
     private var rejectedCount = 0
     private var integration: Double = 0
@@ -108,6 +166,20 @@ public final class CPUStacker: Stacking {
     /// Diagnostics from the most recent `add` (for session telemetry chips).
     public private(set) var lastMatchCount = 0
     public private(set) var lastResidualPx = 0.0
+
+    /// Rotation (deg) of the most recent ACCEPTED frame relative to the CURRENT
+    /// reference — not relative to the original grid, because re-baselining keeps
+    /// resetting it. Additive diagnostic; 0 until the first registered frame.
+    public private(set) var lastRotationDeg = 0.0
+    /// How many times the reference star list has been re-seeded this stack.
+    public private(set) var rebaselineCount = 0
+
+    /// Predicted field-rotation rate in deg/second (see
+    /// `NudgePlanner.fieldRotationRateDegPerHour`). Nil = no prediction, which is the
+    /// default and reproduces the historical registration maths exactly. Set it and the
+    /// candidate star list is de-rotated by rate × (frame time − reference time) BEFORE
+    /// the translation vote, then the angle is folded back into the fitted transform.
+    public private(set) var expectedRotationRateDegPerSec: Double?
 
     /// Sky-condition telemetry from the most recent DECODABLE frame handed to
     /// `add` — star count on the stack grid plus the sigma-clipped background —
@@ -129,10 +201,29 @@ public final class CPUStacker: Stacking {
     /// `Stacking` protocol (SessionEngine reads it via a conditional cast).
     public private(set) var lastRejectionReason: String?
 
-    public init(kappaSigma: Double? = 3.0, registration: Bool = true) {
+    public init(kappaSigma: Double? = 3.0, registration: Bool = true,
+                expectedRotationRateDegPerSec: Double? = nil,
+                rotationSearch: Bool = true) {
         self.kappaSigma = kappaSigma
         self.registrationEnabled = registration
         self.registrationActive = registration
+        self.expectedRotationRateDegPerSec = expectedRotationRateDegPerSec
+        self.rotationSearchEnabled = rotationSearch
+    }
+
+    /// Tell the stacker how fast the field rotates (deg/second, positive =
+    /// counter-clockwise). Additive and safe at any time — `SessionEngine` calls it
+    /// right after `reset`, once the target's alt/az and the observer's latitude are
+    /// known. Pass nil to go back to no prediction.
+    ///
+    /// `referenceTimestamp` pins the epoch the angle is measured from; leave it nil and
+    /// the first accepted frame's timestamp becomes the epoch (and every re-baseline
+    /// moves it forward), which is what a live session wants.
+    public func setExpectedRotationRate(degreesPerSecond: Double?,
+                                        referenceTimestamp: Date? = nil) {
+        lock.lock(); defer { lock.unlock() }
+        expectedRotationRateDegPerSec = degreesPerSecond
+        if let referenceTimestamp { self.referenceTimestamp = referenceTimestamp }
     }
 
     // MARK: - Stacking conformance
@@ -149,6 +240,11 @@ public final class CPUStacker: Stacking {
         meanG = [Float](repeating: 0, count: count)
         meanB = [Float](repeating: 0, count: count)
         referenceStars = []
+        baseTransform = .identity
+        referenceTimestamp = nil
+        lastRebaselineAcceptedCount = 0
+        rebaselineCount = 0
+        lastRotationDeg = 0
         acceptedCount = 0
         rejectedCount = 0
         integration = 0
@@ -198,10 +294,14 @@ public final class CPUStacker: Stacking {
             // Seed frame: always accepted. Registration stays active only when the
             // reference actually has enough stars to align against.
             referenceStars = stars
+            baseTransform = .identity
+            referenceTimestamp = frame.timestamp
+            lastRebaselineAcceptedCount = 0
             registrationActive = registrationEnabled && stars.count >= minStarsPerFrame
             transform = .identity
             lastMatchCount = stars.count
             lastResidualPx = 0
+            lastRotationDeg = 0
         } else if !registrationActive {
             // Unregistered accumulate: no alignment, every decodable frame averages in.
             transform = .identity
@@ -213,11 +313,25 @@ public final class CPUStacker: Stacking {
                 lastRejectionReason = "too few stars"
                 return false
             }
+            // Alt-az field rotation: de-rotate the candidate by the PREDICTED angle
+            // before the translation-only offset vote (which only survives ~1° of
+            // rotation), then fold the angle back into the fitted transform. With no
+            // prediction the seed is 0 and the first ladder entry is bit-identical to
+            // the historical code path.
+            let center = frameCenter
+            let seed = predictedRotationRadiansLocked(at: frame.timestamp)
             guard let reg = Self.register(reference: referenceStars, candidate: stars,
                                           voteStars: voteStarCount,
                                           voteTolerance: voteTolerancePx,
                                           coarseTolerance: coarseMatchTolerancePx,
-                                          fineTolerance: fineMatchTolerancePx) else {
+                                          fineTolerance: fineMatchTolerancePx,
+                                          seedRotationRadians: seed,
+                                          rotationCenter: center,
+                                          rotationSearchDegrees: rotationSearchEnabled
+                                              ? Self.rotationSearchWindowDeg : 0,
+                                          rotationSearchStepDegrees: Self.rotationSearchStepDeg,
+                                          searchSatisfiedMatches: rotationSearchSatisfiedMatches)
+            else {
                 rejectedCount += 1
                 lastRejectionReason = "no star alignment found"
                 return false
@@ -232,9 +346,18 @@ public final class CPUStacker: Stacking {
                 lastRejectionReason = "alignment residual too high"
                 return false
             }
-            transform = reg.transform
+            // The fit maps CURRENT-reference coordinates into this frame; the
+            // accumulator needs ORIGINAL-grid → this frame, so compose.
+            transform = SimilarityTransform.compose(outer: reg.transform, inner: baseTransform)
             lastMatchCount = reg.matches
             lastResidualPx = reg.residualPx
+            lastRotationDeg = reg.transform.rotationDegrees
+            // Safety net (works with or without a predicted rate): once the frame has
+            // rotated away from the reference, or the match count starts collapsing,
+            // re-seed the reference from THIS accepted frame and carry the composed
+            // transform forward so output pixels stay in the original grid.
+            maybeRebaselineLocked(stars: stars, reg: reg, composed: transform,
+                                  timestamp: frame.timestamp)
         }
 
         accumulate(gray, rgb: rgb, transform: transform)
@@ -292,6 +415,63 @@ public final class CPUStacker: Stacking {
     public func channelGains() -> (r: Double, b: Double) {
         lock.lock(); defer { lock.unlock() }
         return (Double(renderGainR), Double(renderGainB))
+    }
+
+    // MARK: - Rotation-aware registration helpers (instance side; callers hold `lock`)
+
+    /// Centre of the stack grid — the pivot the predicted rotation is applied about.
+    /// Any pivot works (a rotation about another point differs only by a translation,
+    /// which the offset vote absorbs); the centre keeps the de-rotation error smallest.
+    private var frameCenter: (x: Double, y: Double) {
+        (Double(width) * 0.5, Double(height) * 0.5)
+    }
+
+    /// Predicted field rotation (radians) between the current reference frame and a
+    /// frame captured at `date`. Zero — and therefore a no-op — whenever no rate has
+    /// been supplied, so an un-configured stacker behaves exactly as it always has.
+    private func predictedRotationRadiansLocked(at date: Date) -> Double {
+        guard let rate = expectedRotationRateDegPerSec, rate.isFinite, rate != 0,
+              let epoch = referenceTimestamp else { return 0 }
+        let dt = date.timeIntervalSince(epoch)
+        guard dt.isFinite else { return 0 }
+        // Clamp: a prediction this far from the reference is extrapolation, not
+        // knowledge (a stale epoch or a bogus frame clock must not fling the seed
+        // somewhere the search window can never walk back from).
+        let degrees = min(max(rate * dt, -Self.maxPredictedRotationDeg),
+                          Self.maxPredictedRotationDeg)
+        return degrees * .pi / 180.0
+    }
+
+    /// Re-baseline the reference star list onto the just-ACCEPTED frame when the
+    /// reference has gone stale — the accumulated rotation is past
+    /// `rebaselineRotationDeg`, or the match count has fallen below
+    /// `rebaselineMatchFloor`. Only ever called for accepted frames.
+    ///
+    /// The new reference must not be materially poorer than the one it replaces (at
+    /// least half its stars), and re-baselines are spaced by `rebaselineCooldownFrames`,
+    /// so a thin or noisy frame can never hijack the reference.
+    private func maybeRebaselineLocked(stars: [DetectedStar],
+                                       reg: (transform: SimilarityTransform, matches: Int,
+                                             residualPx: Double),
+                                       composed: SimilarityTransform,
+                                       timestamp: Date) {
+        let rotated = abs(reg.transform.rotationDegrees) >= Self.rebaselineRotationDeg
+        let thinning = reg.matches < rebaselineMatchFloor
+        guard rotated || thinning else { return }
+        guard acceptedCount - lastRebaselineAcceptedCount >= Self.rebaselineCooldownFrames else {
+            return
+        }
+        // The composed transform becomes permanent, so only a HIGH-quality fit may be
+        // folded into it — a merely acceptable one (up to `maxResidualPx`) would bake
+        // its error into every later frame.
+        guard reg.residualPx <= maxResidualPx * 0.5 else { return }
+        guard stars.count >= minStarsPerFrame,
+              stars.count * 2 >= referenceStars.count else { return }
+        referenceStars = stars
+        baseTransform = composed
+        referenceTimestamp = timestamp
+        lastRebaselineAcceptedCount = acceptedCount
+        rebaselineCount += 1
     }
 
     // MARK: - Accumulation
@@ -664,11 +844,100 @@ public final class CPUStacker: Stacking {
         return (sum / Double(pairs.count)).squareRoot()
     }
 
-    /// Full registration: vote translation → coarse match → similarity fit → fine re-match → refit.
+    /// Rotate a star list by `radians` about `center` (pure; flux untouched).
+    public static func rotate(_ stars: [DetectedStar], radians: Double,
+                              about center: (x: Double, y: Double)) -> [DetectedStar] {
+        guard radians != 0 else { return stars }
+        let c = cos(radians), s = sin(radians)
+        return stars.map { star in
+            let dx = star.x - center.x, dy = star.y - center.y
+            return DetectedStar(x: c * dx - s * dy + center.x,
+                                y: s * dx + c * dy + center.y,
+                                flux: star.flux)
+        }
+    }
+
+    /// Full registration: vote translation → coarse match → similarity fit → fine
+    /// re-match → refit.
+    ///
+    /// ROTATION AWARENESS (the alt-az night-killer). The offset vote is translation-only
+    /// and tolerates barely a degree of field rotation, so the candidate list is first
+    /// de-rotated about `rotationCenter` by a seed angle; the seed is folded back into
+    /// the returned transform, which therefore still maps reference pixels into the
+    /// ORIGINAL (un-rotated) candidate frame. Residuals are unaffected — de-rotation is
+    /// an isometry.
+    ///
+    /// Seeds are tried in this order until one matches at least `searchSatisfiedMatches`
+    /// stars, and the best result of all attempts is returned otherwise:
+    ///   1. `seedRotationRadians` (0 by default → the historical maths, bit-identical),
+    ///   2. its negation (a sky-vs-sensor handedness mismatch costs one extra attempt)
+    ///      and zero (so a wrong prediction can never hide the un-seeded solution),
+    ///   3. a ±`rotationSearchDegrees` ladder in `rotationSearchStepDegrees` steps.
+    /// With `rotationSearchDegrees == 0` (the default) only step 1 runs.
     public static func register(reference: [DetectedStar], candidate: [DetectedStar],
                                 voteStars: Int, voteTolerance: Double,
-                                coarseTolerance: Double, fineTolerance: Double)
+                                coarseTolerance: Double, fineTolerance: Double,
+                                seedRotationRadians: Double = 0,
+                                rotationCenter: (x: Double, y: Double) = (0, 0),
+                                rotationSearchDegrees: Double = 0,
+                                rotationSearchStepDegrees: Double = 0.5,
+                                searchSatisfiedMatches: Int = 10)
         -> (transform: SimilarityTransform, matches: Int, residualPx: Double)? {
+        var best: (transform: SimilarityTransform, matches: Int, residualPx: Double)?
+        for seed in rotationSeedLadder(seed: seedRotationRadians,
+                                       windowDegrees: rotationSearchDegrees,
+                                       stepDegrees: rotationSearchStepDegrees) {
+            guard let attempt = registerOnce(reference: reference, candidate: candidate,
+                                             voteStars: voteStars, voteTolerance: voteTolerance,
+                                             coarseTolerance: coarseTolerance,
+                                             fineTolerance: fineTolerance,
+                                             seedRotationRadians: seed,
+                                             rotationCenter: rotationCenter) else { continue }
+            if let current = best {
+                // More matched stars wins; ties break on the tighter residual.
+                if attempt.matches > current.matches
+                    || (attempt.matches == current.matches
+                        && attempt.residualPx < current.residualPx) {
+                    best = attempt
+                }
+            } else {
+                best = attempt
+            }
+            if attempt.matches >= searchSatisfiedMatches { break }
+        }
+        return best
+    }
+
+    /// Seed angles (radians) to try, in priority order. Deterministic and finite.
+    static func rotationSeedLadder(seed: Double, windowDegrees: Double,
+                                   stepDegrees: Double) -> [Double] {
+        var ladder = [seed]
+        guard windowDegrees > 0, stepDegrees > 0 else { return ladder }
+        if seed != 0 {
+            ladder.append(-seed)     // sky-vs-sensor handedness
+            ladder.append(0)         // …and the un-seeded solution is always reachable
+        }
+        let steps = Int((windowDegrees / stepDegrees).rounded(.down))
+        guard steps > 0 else { return ladder }
+        let stepRad = stepDegrees * .pi / 180.0
+        for i in 1...steps {
+            ladder.append(seed + Double(i) * stepRad)
+            ladder.append(seed - Double(i) * stepRad)
+        }
+        return ladder
+    }
+
+    /// One registration attempt under a fixed seed rotation. With `seedRotationRadians`
+    /// == 0 this is v1's registration, unchanged line for line.
+    private static func registerOnce(reference: [DetectedStar], candidate: [DetectedStar],
+                                     voteStars: Int, voteTolerance: Double,
+                                     coarseTolerance: Double, fineTolerance: Double,
+                                     seedRotationRadians: Double,
+                                     rotationCenter: (x: Double, y: Double))
+        -> (transform: SimilarityTransform, matches: Int, residualPx: Double)? {
+        // Work in coordinates where the predicted rotation has been undone, so the
+        // translation vote sees (almost) pure translation again.
+        let candidate = rotate(candidate, radians: -seedRotationRadians, about: rotationCenter)
         guard let t0 = estimateTranslation(reference: reference, candidate: candidate,
                                            take: voteStars, tolerance: voteTolerance) else { return nil }
         let coarse = SimilarityTransform(cosT: 1, sinT: 0, tx: t0.dx, ty: t0.dy)
@@ -680,7 +949,14 @@ public final class CPUStacker: Stacking {
                                    transform: transform, tolerance: fineTolerance)
         guard finePairs.count >= 3 else { return nil }
         transform = fitSimilarity(finePairs)
-        return (transform, finePairs.count, rmsResidual(finePairs, transform))
+        let residual = rmsResidual(finePairs, transform)
+        // Fold the seed back: the fit lives in de-rotated coordinates, the caller wants
+        // reference → the real candidate frame. A rigid rotation preserves distances, so
+        // the residual carries over untouched.
+        guard seedRotationRadians != 0 else { return (transform, finePairs.count, residual) }
+        let back = SimilarityTransform.rotation(radians: seedRotationRadians, about: rotationCenter)
+        return (SimilarityTransform.compose(outer: back, inner: transform),
+                finePairs.count, residual)
     }
 
     private static func median(_ values: [Double]) -> Double {

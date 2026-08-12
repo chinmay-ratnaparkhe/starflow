@@ -37,7 +37,13 @@ final class EventCatalogTests: XCTestCase {
                       "Perseids peak the night of Aug 12–13, got day \(comps.day ?? 0)")
         XCTAssertEqual(perseids.kind, .meteorShower)
         XCTAssertEqual(perseids.tier, .annual)
-        XCTAssertEqual(perseids.zhr, 100)
+        // 2026 is a documented sparse year — the card must promise the year's
+        // modelled rate (60), never the 100 long-run average.
+        XCTAssertEqual(perseids.zhr, 60)
+        XCTAssertTrue(perseids.detail.contains("~60/hour"),
+                      "The detail line must quote the same rate: \(perseids.detail)")
+        XCTAssertFalse(perseids.detail.contains("100"),
+                       "The 100 average must not leak into a 2026 card: \(perseids.detail)")
         XCTAssertEqual(perseids.matchingShotModeID, "meteors")
 
         // New moon at the peak → near-zero interference from moonInfo.

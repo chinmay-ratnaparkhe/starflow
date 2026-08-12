@@ -137,8 +137,20 @@ public struct EventCatalog {
         let defaultPeak: (month: Int, day: Int)
         let peakByYear: [Int: (month: Int, day: Int)]
         let zhr: Int
+        /// Per-year ZHR overrides for documented off-years. A shower's headline
+        /// rate is a long-run average, and the stream is not uniform: in some
+        /// years the Earth misses the dense filaments and the background rate
+        /// itself runs low. Where the literature says so for a specific year,
+        /// the number the Tonight card promises must follow — an overpromise
+        /// sends someone up a mountain expecting a rate that isn't coming.
+        /// Falls back to `zhr` for every year not listed. Appended field,
+        /// defaulted empty so existing specs are unchanged.
+        var zhrByYear: [Int: Int] = [:]
         let radiant: EquatorialCoord
         let parent: String
+
+        /// The rate to promise for `year`.
+        func zhr(forYear year: Int) -> Int { zhrByYear[year] ?? zhr }
     }
 
     /// The 12 major annual showers. ZHR is the idealized dark-sky zenith rate — real
@@ -162,7 +174,14 @@ public struct EventCatalog {
                    parent: "comet 96P/Machholz"),
         ShowerSpec(id: "perseids", name: "Perseids", activeRange: "Jul 17 – Aug 24",
                    defaultPeak: (8, 12), peakByYear: [2026: (8, 12), 2027: (8, 13), 2028: (8, 12)],
-                   zhr: 100, radiant: EquatorialCoord(raHours: 3.1, decDeg: 58.0),
+                   zhr: 100,
+                   // 2026 is a documented sparse year: the modelled background
+                   // rate runs notably below the 100 long-run average, and the
+                   // filament component contributes ≤ ~43. A moonless peak makes
+                   // it a genuinely good night — but 60 is the number to promise,
+                   // not 100.
+                   zhrByYear: [2026: 60],
+                   radiant: EquatorialCoord(raHours: 3.1, decDeg: 58.0),
                    parent: "comet 109P/Swift–Tuttle"),
         ShowerSpec(id: "draconids", name: "Draconids", activeRange: "Oct 6 – 10",
                    defaultPeak: (10, 8), peakByYear: [:],
@@ -233,9 +252,9 @@ public struct EventCatalog {
             name: spec.name,
             date: peakDate,
             tier: .annual,
-            detail: "Parent body \(spec.parent) · up to ~\(spec.zhr)/hour under ideal dark "
-                + "skies (real counts run lower) · active \(spec.activeRange)",
-            zhr: spec.zhr,
+            detail: "Parent body \(spec.parent) · up to ~\(spec.zhr(forYear: year))/hour under "
+                + "ideal dark skies (real counts run lower) · active \(spec.activeRange)",
+            zhr: spec.zhr(forYear: year),
             radiant: spec.radiant,
             visibility: EventVisibility(visible: visible, altitudeDeg: alt,
                                         bestTime: best, note: note),

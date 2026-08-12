@@ -39,19 +39,54 @@ final class ExposurePlannerTests: XCTestCase {
         XCTAssertEqual(p.iso, ExposurePlanner.isoFloor, accuracy: 1e-9)
     }
 
-    func testDarkSiteRidesDimSkyRecipesAt3200Plus() {
-        // Aurora-class base (1600): doubling lands exactly on the 3200 floor.
+    func testDarkSiteRidesDimSkyRecipesAtTheFloorNotAboveIt() {
+        // Aurora-class base (1600): lifted UP to the 3200 read-noise floor.
         let aurora = ExposurePlanner.plan(base: skyRecipe(iso: 1600), quality: .dark)
-        XCTAssertGreaterThanOrEqual(aurora.iso, ExposurePlanner.darkSiteISOFloor)
-        // Milky-Way-class base (3200): doubled to 6400, still ≥ 3200.
+        XCTAssertEqual(aurora.iso, ExposurePlanner.darkSiteISOFloor, accuracy: 1e-9,
+                       "A dim-sky base below the floor is raised exactly to it")
+        // Milky-Way-class base (3200): already AT the floor — it must pass
+        // through untouched. Doubling it to 6400 was the old behaviour and it
+        // was wrong: a 1 s sub at a dark site is read-noise dominated, so the
+        // extra stop buys no noise improvement and only clips star cores.
         let mw = ExposurePlanner.plan(base: skyRecipe(iso: 3200), quality: .dark)
-        XCTAssertEqual(mw.iso, 6400, accuracy: 1e-9)
+        XCTAssertEqual(mw.iso, 3200, accuracy: 1e-9,
+                       "Dark skies must not push a 3200 recipe to 6400")
         XCTAssertGreaterThanOrEqual(mw.iso, ExposurePlanner.darkSiteISOFloor)
+    }
+
+    func testDarkSiteNeverAmplifiesABaseRecipe() {
+        // The dark-site rule in one line: LIFT a dim-sky base to the read-noise
+        // floor if it sits below it, and otherwise leave it exactly alone. It
+        // never multiplies, so the planned ISO can never exceed the higher of
+        // the base and the floor (and never the ceiling).
+        //
+        // NOTE: a base of exactly 1600 IS raised — to the 3200 floor — so the
+        // invariant is "planned ≤ max(base, floor)", not "planned ≤ base".
+        for baseISO in [1600.0, 3200.0, 4800.0, 6400.0] {
+            let planned = ExposurePlanner.plan(base: skyRecipe(iso: baseISO), quality: .dark).iso
+            let ceiling = min(max(baseISO, ExposurePlanner.darkSiteISOFloor),
+                              ExposurePlanner.isoCeiling)
+            XCTAssertLessThanOrEqual(planned, ceiling,
+                                     "Dark site amplified an ISO \(baseISO) recipe to \(planned)")
+            XCTAssertEqual(planned, ceiling, accuracy: 1e-9,
+                           "Dark site must land on max(base, floor) for ISO \(baseISO)")
+        }
     }
 
     func testDarkClampsAtTheCeiling() {
         let p = ExposurePlanner.plan(base: skyRecipe(iso: 6400), quality: .dark)
         XCTAssertEqual(p.iso, ExposurePlanner.isoCeiling, accuracy: 1e-9)
+    }
+
+    func testMilkyWayModeStaysAt3200UnderADarkSky() {
+        // The field case this exists for: the Milky Way recipe at a Bortle 1–2
+        // site must run its native ISO 3200, not 6400.
+        guard let milkyWay = ShotModeRegistry.mode(id: "milkyway") else {
+            return XCTFail("milkyway mode missing")
+        }
+        let planned = ExposurePlanner.adjustedRecipe(base: milkyWay.recipe, quality: .dark)
+        XCTAssertEqual(planned.iso, 3200, accuracy: 1e-9)
+        XCTAssertEqual(planned.exposureSeconds, 1.0, accuracy: 1e-12)
     }
 
     func testTargetLitRecipesAreQualityBlind() {
@@ -104,7 +139,9 @@ final class ExposurePlannerTests: XCTestCase {
         let base = CaptureRecipe(exposureSeconds: 1.0, iso: 800, targetSubCount: 240,
                                  nudgeTracking: false, intervalSeconds: 30)
         let adjusted = ExposurePlanner.adjustedRecipe(base: base, quality: .dark)
-        XCTAssertEqual(adjusted.iso, 1600, accuracy: 1e-9)
+        // ISO 800 is below the dim-sky threshold, so the dark-site floor doesn't
+        // apply and dark-site gain is 1.0 — the recipe passes through untouched.
+        XCTAssertEqual(adjusted.iso, 800, accuracy: 1e-9)
         XCTAssertEqual(adjusted.targetSubCount, 240)
         XCTAssertFalse(adjusted.nudgeTracking)
         XCTAssertEqual(adjusted.intervalSeconds, 30, accuracy: 1e-12)

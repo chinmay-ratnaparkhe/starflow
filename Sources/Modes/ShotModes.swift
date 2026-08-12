@@ -41,6 +41,21 @@ public struct ShotModeItem: Identifiable, Sendable {
     /// field, defaulted `false` so pre-existing call sites keep compiling;
     /// only City Nights sets it.
     public let capturesForeground: Bool
+    /// Explicit answer to "should this mode run the pre-capture focus sweep?",
+    /// overriding the default inferred from `stackingStyle`. Appended field,
+    /// defaulted `nil` so pre-existing call sites keep compiling AND keep their
+    /// behaviour (see `sweepsFocus`). Meteor Shower sets it: it lighten-blends
+    /// like star trails, but unlike trails it lives or dies on pinpoint stars,
+    /// so it must still sweep.
+    public let sweepsFocusOverride: Bool?
+
+    /// Whether the session should sweep the lens for best focus before
+    /// capturing. Registration-based modes need sharp stars by definition;
+    /// trails and timelapse don't, so the stacking style is the default answer
+    /// — but a mode may say otherwise via `sweepsFocusOverride`.
+    public var sweepsFocus: Bool {
+        sweepsFocusOverride ?? (stackingStyle == .registered)
+    }
 
     public init(id: String, name: String, tagline: String, symbol: String,
                 recipe: CaptureRecipe, expectation: String, tutorial: [TutorialStep],
@@ -50,6 +65,7 @@ public struct ShotModeItem: Identifiable, Sendable {
                 celestialTarget: CelestialTarget? = nil,
                 producesTimelapse: Bool = false,
                 capturesForeground: Bool = false,
+                sweepsFocusOverride: Bool? = nil,
                 feasibility: @escaping @Sendable (SkyContext, SkyQuality) -> Feasibility) {
         self.id = id; self.name = name; self.tagline = tagline; self.symbol = symbol
         self.recipe = recipe; self.expectation = expectation; self.tutorial = tutorial
@@ -59,7 +75,71 @@ public struct ShotModeItem: Identifiable, Sendable {
         self.celestialTarget = celestialTarget
         self.producesTimelapse = producesTimelapse
         self.capturesForeground = capturesForeground
+        self.sweepsFocusOverride = sweepsFocusOverride
         self.feasibility = feasibility
+    }
+
+    // MARK: Wall-clock stop
+
+    /// Copy of this mode whose recipe carries a wall-clock stop (`nil` clears it).
+    /// Nothing else about the mode changes — the sub count, tracking, cadence,
+    /// tutorial and gates are the mode's contract; `stopAt` only adds a second
+    /// way for the capture loop to finish, and it can never extend a session.
+    public func stopping(at date: Date?) -> ShotModeItem {
+        var tuned = recipe
+        tuned.stopAt = date
+        return ShotModeItem(id: id, name: name, tagline: tagline, symbol: symbol,
+                            recipe: tuned, expectation: expectation, tutorial: tutorial,
+                            checklist: checklist,
+                            cityViable: cityViable, needsGimbal: needsGimbal,
+                            stackingStyle: stackingStyle,
+                            celestialTarget: celestialTarget,
+                            producesTimelapse: producesTimelapse,
+                            capturesForeground: capturesForeground,
+                            sweepsFocusOverride: sweepsFocusOverride,
+                            feasibility: feasibility)
+    }
+
+    /// Convenience for the mode detail sheet's "stop after" stepper: a deadline
+    /// `minutes` from `now`. A non-positive value clears the deadline rather
+    /// than creating a session that ends before its first frame.
+    public func stopping(afterMinutes minutes: Int, from now: Date = Date()) -> ShotModeItem {
+        guard minutes > 0 else { return stopping(at: nil) }
+        return stopping(at: now.addingTimeInterval(Double(minutes) * 60))
+    }
+}
+
+/// The wall-clock stop choices offered on the mode detail sheet: no deadline,
+/// or a session that ends this many minutes from the moment it starts.
+public enum SessionStopChoice {
+    /// Minutes offered by the stepper. 0 means "no wall-clock stop".
+    public static let minuteOptions = [0, 15, 30, 45, 60, 90]
+
+    public static func label(minutes: Int) -> String {
+        guard minutes > 0 else { return "None" }
+        if minutes % 60 == 0 { return "\(minutes / 60) h" }
+        if minutes > 60 { return "\(minutes / 60) h \(minutes % 60) m" }
+        return "\(minutes) min"
+    }
+
+    /// Floor on the WALL-CLOCK cost of one sub, whatever the shutter says.
+    /// `CaptureEngine`'s sequential still loop measures 1.00–1.05 s shot-to-shot
+    /// even for very short exposures — the round trip (capture, process, deliver,
+    /// re-arm) dominates, not the shutter. Without this floor a 1/125 s lunar
+    /// plan of 150 subs computes to "about 1 s", which is nonsense on a card a
+    /// tired user reads at 2 am.
+    public static let minimumFrameWallSeconds: Double = 1.0
+
+    /// Rough wall-clock seconds a recipe's plan will take, for the mode sheet's
+    /// stop-time copy. Deliberately separate from `CloudTimeBudget.plannedWallSeconds`
+    /// (which drives the cloud extension cap and must stay exactly as it is): this
+    /// one only has to be honest to a user, so it floors the per-frame cost at the
+    /// real shot-to-shot pacing. Still an estimate, and still a LOWER bound — a
+    /// warm phone spaces frames out further.
+    public static func estimatedWallSeconds(recipe: CaptureRecipe) -> Double {
+        let perFrame = max(max(recipe.exposureSeconds, 0), minimumFrameWallSeconds)
+            + max(recipe.intervalSeconds, 0)
+        return Double(max(0, recipe.targetSubCount)) * perFrame
     }
 }
 
@@ -83,17 +163,21 @@ public enum ShotModeRegistry {
         name: "Milky Way Stack",
         tagline: "Pull the galactic core out of the noise",
         symbol: "sparkles",
-        recipe: CaptureRecipe(exposureSeconds: 1.0, iso: 3200, targetSubCount: 600, nudgeTracking: true),
-        expectation: "Ten minutes of stacked 1-second frames — the iPhone's hard exposure cap for "
-            + "third-party apps — pulls the core's dust lanes out of the noise. Expect a softly "
-            + "glowing band with real structure: a strong phone image, not a tracked-DSLR poster. "
-            + "Dark skies are non-negotiable; from a city this shot simply does not exist.",
+        recipe: CaptureRecipe(exposureSeconds: 1.0, iso: 3200, targetSubCount: 2700, nudgeTracking: true),
+        expectation: "About 45 minutes of stacked 1-second frames — the iPhone's hard exposure cap "
+            + "for third-party apps — pulls the core's dust lanes out of the noise. Depth is the "
+            + "whole game here: signal-to-noise climbs with the square root of integration time, "
+            + "so three quarters of an hour digs roughly twice as deep as ten minutes. Expect a "
+            + "softly glowing band with real structure: a strong phone image, not a tracked-DSLR "
+            + "poster. Dark skies are non-negotiable; from a city this shot simply does not exist. "
+            + "Stop any time — every frame already stacked is kept — or set a wall-clock stop "
+            + "before you start if the core sets on you.",
         tutorial: [
             TutorialStep(id: 1, title: "What you're going for",
                 body: "A luminous band with real dust-lane texture rising out of the grain — a "
-                    + "strong phone image, not a tracked-DSLR poster. Ten minutes of stacked "
-                    + "1-second frames builds it, and the darkness of your site decides how deep "
-                    + "it goes.",
+                    + "strong phone image, not a tracked-DSLR poster. About 45 minutes of "
+                    + "stacked 1-second frames builds it, and the darkness of your site decides "
+                    + "how deep it goes.",
                 symbol: "photo"),
             TutorialStep(id: 2, title: "Set up in real darkness",
                 body: "Get to Bortle 4 or better — skyglow that reaches the sensor can never be "
@@ -106,10 +190,11 @@ public enum ShotModeRegistry {
                     + "a silhouette for scale; the foreground is what sells the shot.",
                 symbol: "scope"),
             TutorialStep(id: 4, title: "What the app does",
-                body: "It fires 600 one-second subs at ISO 3200, nudging the gimbal about every "
-                    + "two minutes to cancel the sky's quarter-degree-per-minute drift, then "
-                    + "aligns, derotates and averages every frame — rejecting any that a cloud "
-                    + "or plane ruins.",
+                body: "It fires 2,700 one-second subs at ISO 3200 — about 45 minutes — nudging "
+                    + "the gimbal roughly every two minutes to cancel the sky's "
+                    + "quarter-degree-per-minute drift, then aligns, derotates and averages "
+                    + "every frame, rejecting any that a cloud or plane ruins. Stopping early "
+                    + "is always safe: it develops whatever is already stacked.",
                 symbol: "wand.and.stars"),
             TutorialStep(id: 5, title: "Pro tip",
                 body: "Plan around the Moon before you plan around the weather: a moonless core "
@@ -503,15 +588,23 @@ public enum ShotModeRegistry {
         symbol: "sparkle",
         recipe: CaptureRecipe(exposureSeconds: 1.0, iso: 3200, targetSubCount: 1200, nudgeTracking: false),
         expectation: "This is a patience game: during a good shower's peak, 20 minutes of frames "
-            + "might catch 2–3 meteors, each frozen as a sharp streak in a single 1-second sub. "
-            + "Most frames will be empty sky — that's normal and expected. Dark skies are required; "
-            + "city glow erases all but rare fireballs.",
+            + "might catch 2–3 meteors, each a sharp streak that lands in a single 1-second sub. "
+            + "Those frames are lighten-blended — brightest pixel wins — so every meteor "
+            + "accumulates onto one composite instead of being averaged away. Be clear about "
+            + "what that composite is: nothing tracks the sky here, and 20 minutes of sky is "
+            + "about 5° of rotation, so the stars come out as short trails, not points. What "
+            + "you get is a star-trail frame with the night's meteors written into it — which "
+            + "is the only way a phone keeps a one-frame streak at full brightness. Most "
+            + "frames will be empty sky, which is normal. Dark skies are required; city glow "
+            + "erases all but rare fireballs.",
         tutorial: [
             TutorialStep(id: 1, title: "What you're going for",
                 body: "A patience game with sharp rewards: during a good shower's peak, 20 "
-                    + "minutes of frames might catch 2–3 meteors, each frozen crisp in a "
-                    + "single 1-second sub. Most frames will be empty sky — normal, not a "
-                    + "failure.",
+                    + "minutes of frames might catch 2–3 meteors, each landing crisp in a "
+                    + "single 1-second sub and then accumulating onto one composite. The "
+                    + "composite is a star-trail frame — untracked, 20 minutes turns the "
+                    + "stars into short arcs — with the meteors laid over it. Most frames "
+                    + "will be empty sky, which is normal, not a failure.",
                 symbol: "photo"),
             TutorialStep(id: 2, title: "Dark skies on the peak night",
                 body: "Meteors are faint, fast, one-frame events; city glow erases all but "
@@ -524,9 +617,15 @@ public enum ShotModeRegistry {
                     + "around +27° — for higher fields, tilt the phone in its clamp first.",
                 symbol: "scope"),
             TutorialStep(id: 4, title: "What the app does",
-                body: "It fires 1,200 one-second frames at ISO 3200 with no tracking, keeping "
-                    + "every sub so a meteor is never averaged away. Watch the live preview "
-                    + "for streaks as they land.",
+                body: "It fires 1,200 one-second frames at ISO 3200 with no tracking and "
+                    + "lighten-blends them — each pixel keeps the brightest value any frame "
+                    + "gave it. A meteor lives in one sub, so averaging would divide it away "
+                    + "and outlier rejection would throw it out; the max blend does neither. "
+                    + "The cost is that it forgets nothing and aligns nothing: the stars "
+                    + "draw ~5° arcs over 20 minutes, and a passing cloud, a plane or a "
+                    + "headlight stays in the frame for good. Stop early if the sky turns — "
+                    + "the blend keeps everything already caught. Watch the live preview: "
+                    + "meteors stay on the frame once they land.",
                 symbol: "wand.and.stars"),
             TutorialStep(id: 5, title: "Pro tip",
                 body: "Stay up late: after midnight your side of Earth turns to face the "
@@ -537,6 +636,16 @@ public enum ShotModeRegistry {
         checklist: ModeChecklists.meteors,
         cityViable: false,
         needsGimbal: false,
+        // Lighten (per-pixel max) blend, NOT the registered star stack. A meteor
+        // exists in exactly one sub: a registered mean would divide it by N and
+        // then kappa-sigma would clip what's left as a >3σ outlier — the mode
+        // would erase the only thing it exists to catch. TrailsBlender does no
+        // averaging and no rejection, so a transient can never be lost.
+        stackingStyle: .trails,
+        // …but unlike star trails, this mode needs pinpoint focus: a meteor is
+        // one thin streak in one frame, and a defocused one is just a smudge.
+        // The style would otherwise skip the focus sweep along with trails.
+        sweepsFocusOverride: true,
         feasibility: { sky, quality in
             if quality == .city {
                 return .notTonight(reason: "Meteors are faint and fast — city skyglow erases all "

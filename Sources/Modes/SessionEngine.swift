@@ -30,12 +30,15 @@ public struct SessionHooks {
     /// Clock + scheduler seams (tests compress time here).
     public var now: @MainActor () -> Date
     public var sleep: (TimeInterval) async throws -> Void
-    /// Storage pre-flight seam: bytes each captured sub is expected to write. Defaults
-    /// to the StorageBudget estimate honoring the "Keep RAW subs" setting; declared
-    /// with a default so the memberwise init above keeps its signature.
+    /// Storage pre-flight seam: bytes each captured sub is expected to write.
+    /// Defaults to the StorageBudget estimate for what this build ACTUALLY
+    /// persists (`StorageBudget.retainsSubsOnDisk` — see the note there: no
+    /// per-sub files are written yet, so a "keep RAW subs" preference must not
+    /// be allowed to inflate the plan and refuse the session). Declared with a
+    /// default so the memberwise init above keeps its signature.
     public var estimatedBytesPerFrame: @MainActor (CaptureRecipe) -> Int64 = { recipe in
         StorageBudget.estimatedBytesPerFrame(
-            recipe: recipe, keepingSubs: UserDefaults.standard.bool(forKey: "keepSubs"))
+            recipe: recipe, keepingSubs: StorageBudget.retainsSubsOnDisk())
     }
     /// True when the capture closures synthesize frames instead of driving real camera
     /// hardware (simulator builds only). The UI badges everything derived from a
@@ -324,7 +327,22 @@ public final class SessionEngine: ObservableObject {
 
     // MARK: Published session state
 
-    @Published public private(set) var phase: SessionPhase = .connect
+    @Published public private(set) var phase: SessionPhase = .connect {
+        didSet {
+            guard oldValue != phase else { return }
+            let now = Date()
+            phaseDurations[oldValue.rawValue, default: 0] += now.timeIntervalSince(phaseEnteredAt)
+            phaseEnteredAt = now
+        }
+    }
+    /// Wall-clock seconds spent in each phase of the CURRENT session, keyed by
+    /// `SessionPhase.rawValue` and accumulated as the phase changes (the phase
+    /// still running is not included until it ends). Pure diagnostics — the
+    /// AutoTest harness reports per-phase timing from it and nothing in the
+    /// state machine reads it. Deliberately measured on the real clock rather
+    /// than `hooks.now`, so time-compressed tests are unaffected either way.
+    @Published public private(set) var phaseDurations: [String: Double] = [:]
+    private var phaseEnteredAt = Date()
     @Published public private(set) var interruption: SessionInterruption?
     @Published public private(set) var stats = SessionStats()
     @Published public private(set) var latestPreview: CGImage?
@@ -415,6 +433,32 @@ public final class SessionEngine: ObservableObject {
         UserDefaults.standard.object(forKey: "autoFocusSweep") as? Bool ?? true
     }
 
+    /// Settings key for the mid-session ISO refinement opt-in (defaults OFF).
+    public static let midSessionISODefaultsKey = "midSessionISORefine"
+
+    /// Test/preview override for the mid-session ISO refinement. `nil` (the
+    /// default) follows the Settings toggle, which is OFF unless the user turns
+    /// it on — so a stock session NEVER changes ISO mid-run.
+    ///
+    /// Why off by default: the refinement's low-background trigger fires at
+    /// ≤ 0.02, and a correct 1 s sub at a genuine dark site measures 0.005–0.03.
+    /// In other words the trigger is routine at exactly the sites this app is
+    /// built for, and firing it doubles gain in the middle of an accumulator —
+    /// leaving a stack made of two populations with different noise and
+    /// different star-core clipping, which no amount of later processing
+    /// separates. A stack must be one exposure, start to finish. The mechanism
+    /// stays available for the deliberate experimenter, off the path of anyone
+    /// shooting for real.
+    public var midSessionISORefine: Bool?
+
+    /// Effective answer for this session: explicit override, else the Settings
+    /// toggle, else off.
+    private var midSessionISOEnabled: Bool {
+        if let midSessionISORefine { return midSessionISORefine }
+        return UserDefaults.standard
+            .object(forKey: SessionEngine.midSessionISODefaultsKey) as? Bool ?? false
+    }
+
     private let mount: MountControlling
     /// Explicitly injected stacker (tests/previews). When present it is used for every
     /// session verbatim; when nil, `start(shot:)` picks a stacker per mode.
@@ -466,6 +510,10 @@ public final class SessionEngine: ObservableObject {
     /// Measured sky-background samples (0…1) from this session's frames —
     /// feeds the one-shot mid-session exposure refinement.
     private var backgroundSamples: [Double] = []
+    /// The most recent frame's measured sky facts (star count + background),
+    /// kept so the per-frame evidence row can carry the SAME numbers the sky
+    /// monitor saw — never a second, separately measured value.
+    private var lastFrameObservation: SkyObservation?
     /// The single mid-session ISO adjustment has been evaluated (applied or
     /// declined) — "one adjustment mid-session max" lives here.
     private var exposureRefineEvaluated = false
@@ -528,6 +576,11 @@ public final class SessionEngine: ObservableObject {
         guard sessionTask == nil else { return }
         generation += 1
         let gen = generation
+        // Per-frame evidence ledger for this session: Documents/autotest/frames.csv
+        // plus the bounded JPEG frame dumps. Opened here so probe frames (focus
+        // sweep, GoTo solves, cityscape foreground) are logged too.
+        FrameTruthLog.shared.beginSession()
+        lastFrameObservation = nil
         // Mode-aware stacking: trails lighten-blend / timelapse unregistered mean /
         // registered star stack. An injected stacker (tests) always wins.
         if injectedStacker == nil {
@@ -582,6 +635,10 @@ public final class SessionEngine: ObservableObject {
         fresh.captureTilt = hooks.captureTilt()
         stats = fresh
         phase = .connect
+        // Per-phase timing starts fresh with the session (the assignment above
+        // may have folded the previous run's last phase in — discard that).
+        phaseDurations = [:]
+        phaseEnteredAt = Date()
         statusDetail = "Starting \(shot.name)…"
         sessionTask = Task { [weak self] in
             await self?.run(shot: shot, gen: gen)
@@ -605,6 +662,9 @@ public final class SessionEngine: ObservableObject {
         awaitingResume = false
         backgroundPaused = false
         isRunning = false
+        // The evidence ledger closes on EVERY exit path, abort included — a
+        // user-stopped session still leaves a complete frames.csv behind.
+        FrameTruthLog.shared.endSession()
         let mount = self.mount
         let endCapture = hooks.endCapture
         Task {
@@ -772,16 +832,20 @@ public final class SessionEngine: ObservableObject {
     /// live camera frame and the capture pipeline only exists from that point.
     private func runAimAssist(target: CelestialTarget) async {
         guard mount.authority == .granted else {
+            stats.aimAssistOutcome = "skipped: no motor authority"
             statusDetail = "Squeeze the gimbal trigger for auto-aim, or frame manually."
             return
         }
         guard let location = AppLocation.shared.current else {
+            stats.aimAssistOutcome = "skipped: no location fix"
             statusDetail = "No location fix yet — frame \(target.displayName) manually."
             return
         }
         let assist = AimAssist()
         let coord = assist.resolve(target: target, location: location, date: hooks.now())
         guard coord.altitudeDeg > 0 else {
+            stats.aimAssistOutcome = String(format: "skipped: target below horizon (%.1f°)",
+                                            coord.altitudeDeg)
             statusDetail = "Aim Assist skipped: \(target.displayName) is below the horizon "
                 + "right now — frame manually or wait for it to rise."
             return
@@ -793,20 +857,28 @@ public final class SessionEngine: ObservableObject {
             }
             lastMountActivityAt = hooks.now()
             if outcome.pitchClamped {
+                stats.aimAssistOutcome = String(
+                    format: "slewed, pitch clamped at the envelope (target alt %.1f°, az %.1f°)",
+                    coord.altitudeDeg, coord.azimuthDeg)
                 statusDetail = "Aimed as far as the tilt range allows — nudge the framing "
                     + "by hand, then confirm."
             } else {
+                stats.aimAssistOutcome = String(format: "slewed to alt %.1f°, az %.1f°",
+                                                coord.altitudeDeg, coord.azimuthDeg)
                 statusDetail = "Target in frame — confirm framing."
             }
         } catch MountError.noAuthority {
+            stats.aimAssistOutcome = "failed: authority revoked mid-slew"
             statusDetail = "Squeeze the gimbal trigger for auto-aim, or frame manually."
         } catch is CancellationError {
             // Our own cancellation propagates from aimPhase's checkCancellation;
             // a cancellation leaked by a dependency just means: frame manually.
+            stats.aimAssistOutcome = "interrupted"
             statusDetail = "Aim Assist interrupted — frame \(target.displayName) manually."
         } catch {
             let reason = (error as? LocalizedError)?.errorDescription
                 ?? "the gimbal refused the move"
+            stats.aimAssistOutcome = "failed: \(reason)"
             statusDetail = "Aim Assist couldn't finish (\(reason)) "
                 + "— frame \(target.displayName) manually."
         }
@@ -894,6 +966,11 @@ public final class SessionEngine: ObservableObject {
         stats.captureTilt = hooks.captureTilt()
         captureDims = dims
         stacker.reset(width: dims.width, height: dims.height)
+        // Alt-az field rotation feed-forward: hand the stacker the rate the sky will
+        // spin the FRAME at, so registration de-rotates each sub before its offset
+        // vote instead of failing wholesale ~10 minutes into a long stack.
+        // Must follow `reset` (which clears the rotation epoch).
+        configureFieldRotation(shot: shot)
 
         // Cityscape dual-phase (feature 10), Phase A FIRST: park the head and
         // bank the static foreground — a 3-frame exposure bracket plus 6
@@ -937,7 +1014,32 @@ public final class SessionEngine: ObservableObject {
 
         var index = 0
         var attempt = 0
+        var stoppedOnClock = false
+        // The deadline runs from the moment the user set it, and Connect, Aim
+        // (which waits on a human confirming the framing), GoTo and the focus
+        // sweep all spend it. If it is already gone before the first shutter,
+        // say so plainly instead of handing back a session that captured
+        // nothing — at 2 am an empty landing report reads as a crash.
+        if let stopAt = recipe.stopAt, hooks.now() >= stopAt {
+            statusDetail = "Your stop time passed while we were setting up — "
+                + "grabbing one frame so the night isn't empty, then wrapping up."
+        }
         while index < recipe.targetSubCount {
+            // Wall-clock stop (`recipe.stopAt`): an ADDITIONAL stop condition
+            // alongside the sub count — whichever lands first ends the session.
+            // Checked at the top of the loop so the deadline is honoured even
+            // while clouds are extending the run, and before the shutter fires
+            // so no frame is taken past the user's window. Everything already
+            // stacked develops normally; this is a clean finish, not an abort.
+            //
+            // `attempt > 0` is the floor, not a grace period: a deadline that
+            // elapsed during setup would otherwise end capture at zero frames
+            // and develop an empty stack. One extra 1-second exposure is a
+            // negligible overrun of the user's window; a blank night is not.
+            if let stopAt = recipe.stopAt, hooks.now() >= stopAt, attempt > 0 {
+                stoppedOnClock = true
+                break
+            }
             try Task.checkCancellation()
             syncMirrors()
             try await pauseGateway(shot: shot)     // background pause + flap handling
@@ -962,8 +1064,15 @@ public final class SessionEngine: ObservableObject {
             }
 
             let frame = try await hooks.captureSub(recipe, attempt)
+            let frameAttempt = attempt
             attempt += 1
             syncFocusTelemetry()
+            // Per-frame evidence: on device the capture engine has already
+            // staged this frame's camera truth (matched by timestamp); the
+            // simulator path stages a clearly-marked synthetic row here. The
+            // stacker's verdict is annotated onto the SAME row below.
+            FrameTruthLog.shared.stageIfNeeded(frame: frame, recipe: recipe,
+                                               simulated: hooks.isSimulatedCapture)
             // Timelapse frame retention (feature 8): every captured frame joins
             // the clip (clouds included — they ARE the shot), bounded by the
             // policy's cap and storage floor. Narrations hold for one frame via
@@ -978,6 +1087,7 @@ public final class SessionEngine: ObservableObject {
             let skippedForClouds = cloudGateActive && skyCondition == .cloudy
             var skyAdvicePosted = false
             var colorCalNarrated = false
+            var stackAccepted: Bool?
             if skippedForClouds {
                 // `feedRefine: false`: a cloud-lit background is real but
                 // unrepresentative of the sky the stack exposes under — it must
@@ -996,6 +1106,7 @@ public final class SessionEngine: ObservableObject {
                 }
             } else {
                 let accepted = stacker.add(frame: frame)
+                stackAccepted = accepted
                 skyAdvicePosted = observeSky(frame: frame, cpuStacker: stacker as? CPUStacker,
                                              gated: cloudGateActive)
                 if accepted {
@@ -1033,6 +1144,14 @@ public final class SessionEngine: ObservableObject {
                 }
                 index += 1
             }
+            // Close this frame's evidence row: the stacker's star count and
+            // accept/reject verdict land on the SAME row as the camera truth,
+            // one row per frame, no gaps. Cheap: no measurement is repeated —
+            // every number here was already computed for this frame.
+            annotateFrameEvidence(frame: frame, sessionFrameIndex: frameAttempt,
+                                  phase: skippedForClouds ? "cloudSkip" : "capture",
+                                  accepted: stackAccepted,
+                                  cloudSkipped: skippedForClouds)
             // One-shot exposure refinement: once the first few frames have
             // MEASURED the sky background, trade gain in whichever direction
             // the histogram says (see ExposurePlanner.refine). Narrated once.
@@ -1063,14 +1182,33 @@ public final class SessionEngine: ObservableObject {
                 if skyCondition != .clear && skyCondition != .unknown {
                     line += " · \(skyCondition.displayName) sky"
                 }
+                if let stopAt = recipe.stopAt {
+                    line += " · until \(SessionEngine.clockTime(stopAt))"
+                }
                 statusDetail = line
             }
 
-            let gap = recipe.intervalSeconds + thermalBackoffSeconds
+            var gap = recipe.intervalSeconds + thermalBackoffSeconds
+            // Never idle past the wall-clock deadline: on a 30 s cadence the
+            // session would otherwise sit through most of a minute it doesn't
+            // have before noticing at the top of the loop.
+            if let remaining = recipe.secondsUntilStop(from: hooks.now()) {
+                gap = min(gap, remaining)
+            }
             if gap > 0, index < recipe.targetSubCount {
                 try await waitGap(gap, shot: shot)
             }
         }
+        if stoppedOnClock {
+            stats.stoppedOnClock = true
+            statusDetail = "Wall-clock stop reached — wrapping up with "
+                + "\(stats.subsAccepted) frames stacked."
+        }
+    }
+
+    /// "9:41 PM" in the user's locale — the wall-clock stop's display form.
+    static func clockTime(_ date: Date) -> String {
+        date.formatted(date: .omitted, time: .shortened)
     }
 
     // MARK: Cityscape foreground phase (feature 10, Phase A)
@@ -1099,6 +1237,7 @@ public final class SessionEngine: ObservableObject {
             statusDetail = "Foreground bracket — exposure \(slot + 1) of \(bracket.count). "
                 + "Hold still…"
             let frame = try await hooks.captureSub(subRecipe, 0)
+            logProbeFrame(frame, recipe: subRecipe, phase: "foregroundBracket")
             guard let image = frame.pixelData,
                   let retained = CityscapeComposer.retentionCopy(image) else { continue }
             switch slot {
@@ -1113,6 +1252,7 @@ public final class SessionEngine: ObservableObject {
             try runGuardians()
             statusDetail = "Foreground base frames — \(n) of \(baseTarget). Hold still…"
             let frame = try await hooks.captureSub(bracket[0], 0)
+            logProbeFrame(frame, recipe: bracket[0], phase: "foregroundBase")
             if let image = frame.pixelData,
                let retained = CityscapeComposer.retentionCopy(image) {
                 cityscapeBaseFrames.append(retained)
@@ -1129,8 +1269,10 @@ public final class SessionEngine: ObservableObject {
     /// when the measured sky is cloudy/overexposed, the frame is starless
     /// (indoors), or the sharpness signal is too weak to trust.
     private func focusSweepStage(shot: ShotModeItem, recipe: CaptureRecipe) async throws {
-        guard autoFocusSweep, focusSweepUserEnabled,
-              shot.stackingStyle == .registered else { return }
+        // `sweepsFocus` defaults to "registered styles only" but a mode may
+        // override it: Meteor Shower lighten-blends like trails yet lives or
+        // dies on pinpoint stars, so it sweeps too.
+        guard autoFocusSweep, focusSweepUserEnabled, shot.sweepsFocus else { return }
         let plan = FocusSweepPlan()
         if skyCondition == .cloudy || skyCondition == .overexposed {
             focusSweepStatus = .skipped(reason: "sky is \(skyCondition.displayName)")
@@ -1145,6 +1287,7 @@ public final class SessionEngine: ObservableObject {
             // no exposure is wasted.
             let probe = try await hooks.captureSub(recipe, 0)
             observeSky(frame: probe, cpuStacker: nil, gated: pauseStackingWhenCloudy)
+            logProbeFrame(probe, recipe: recipe, phase: "focusProbe")
             if let image = probe.pixelData,
                let observation = SkyConditionMonitor.measure(image: image,
                                                             width: captureDims.width,
@@ -1179,7 +1322,9 @@ public final class SessionEngine: ObservableObject {
                         try await self.waitWhileSuspended()
                         if shot.needsGimbal { await self.keepaliveIfIdle() }
                     }
-                    return try await sweepHooks.captureSub(recipe, 0)
+                    let frame = try await sweepHooks.captureSub(recipe, 0)
+                    self?.logProbeFrame(frame, recipe: recipe, phase: "focusSweep")
+                    return frame
                 },
                 score: { frame in sweepHooks.focusScore(frame) },
                 onStep: { [weak self] step, planned in
@@ -1233,8 +1378,15 @@ public final class SessionEngine: ObservableObject {
                 let frame = try await hooks.captureSub(recipe, 0)
                 // Undecodable frame = nothing to read: an empty field flows
                 // through the controller's honest tooFewStars path.
-                return hooks.detectStarField(frame)
+                let field = hooks.detectStarField(frame)
                     ?? GoToController.StarField(centroids: [], imageSize: .zero)
+                // Solve frames are real exposures — they get an evidence row
+                // too, carrying the centroid count the solver actually saw.
+                FrameTruthLog.shared.stageIfNeeded(frame: frame, recipe: recipe,
+                                                   simulated: hooks.isSimulatedCapture)
+                FrameTruthLog.shared.annotate(timestamp: frame.timestamp, phase: "goToSolve",
+                                              starCount: field.centroids.count)
+                return field
             },
             solve: { [weak self] field, fovDeg in
                 let solution = hooks.solveStarField(field, fovDeg)
@@ -1257,12 +1409,17 @@ public final class SessionEngine: ObservableObject {
     /// caller's `Task.checkCancellation()`.
     private func runGoToAcquire(shot: ShotModeItem, recipe: CaptureRecipe,
                                 reacquire: Bool) async {
-        guard goToSupported(shot), let target = shot.celestialTarget else { return }
+        guard goToSupported(shot), let target = shot.celestialTarget else {
+            stats.goToOutcome = "not applicable for this mode"
+            return
+        }
         guard mount.authority == .granted else {
+            stats.goToOutcome = "skipped: no motor authority"
             statusDetail = "Plate-solve aim needs gimbal control — keeping the compass aim."
             return
         }
         guard let location = AppLocation.shared.current else {
+            stats.goToOutcome = "skipped: no location fix"
             statusDetail = "Plate-solve aim needs a location fix — keeping the compass aim."
             return
         }
@@ -1282,17 +1439,25 @@ public final class SessionEngine: ObservableObject {
             lastDriftCheckAt = hooks.now()
             nudgesAtLastDriftCheck = stats.nudges
             lastMountActivityAt = hooks.now()
+            stats.goToAcquires += 1
+            stats.goToFinalErrorDeg = outcome.finalErrorDeg
+            stats.goToOutcome = String(
+                format: "locked %.2f° from center in %d solves, %d corrections",
+                outcome.finalErrorDeg, outcome.iterations, outcome.corrections)
             statusDetail = String(format: "Locked on %@ — %.1f° from center.",
                                   target.displayName, outcome.finalErrorDeg)
         } catch is CancellationError {
             // Our own cancellation propagates via the caller's checkCancellation;
             // a leaked one just means: continue on the coarse aim.
+            stats.goToOutcome = "interrupted"
             statusDetail = "Aim refinement interrupted — continuing on the compass aim."
         } catch let failure as GoToController.Failure {
+            stats.goToOutcome = "failed: \(failure.fallbackReason)"
             statusDetail = "Plate-solve aim skipped — \(failure.fallbackReason) "
                 + (reacquire ? "Check your framing (re-dock can recenter the head)."
                              : "Keeping the compass aim — fine-tune by hand.")
         } catch {
+            stats.goToOutcome = "failed: unexpected error"
             statusDetail = "Plate-solve aim couldn't finish — keeping the compass aim."
         }
     }
@@ -1326,6 +1491,7 @@ public final class SessionEngine: ObservableObject {
                 toleranceDeg: Self.driftToleranceDeg) { [weak self] line in
                     self?.statusDetail = line
                 }
+            stats.lastDriftDeg = outcome.driftDeg
             if outcome.corrected {
                 stats.driftCorrections += 1
                 lastMountActivityAt = hooks.now()
@@ -1346,6 +1512,44 @@ public final class SessionEngine: ObservableObject {
                 + (recipe.nudgeTracking ? "relying on nudge tracking."
                                         : "keeping the current aim.")
         }
+    }
+
+    // MARK: Field rotation feed-forward (alt-az registration)
+
+    /// Give the registered star stacker the predicted field-rotation rate for tonight's
+    /// target: R = 15.04 · cos(lat) · cos(Az) / cos(Alt) deg/hr
+    /// (`NudgePlanner.fieldRotationRateDegPerHour`). The Flow 2 Pro is an alt-az head, so
+    /// the field rotates even when the framing is held perfectly — ~10 deg/hr for a low
+    /// southern Milky Way core at 48° N, which is 1° of rotation every 6 minutes. Without
+    /// the hint the stacker's translation-only offset vote collapses partway through a
+    /// long stack and every later frame is rejected.
+    ///
+    /// Best-effort, exactly like Aim Assist: no location fix, no celestial target, a
+    /// target below the horizon, or a non-registered stacker (trails / timelapse) simply
+    /// leaves the rate unset — the stacker then behaves precisely as it did before, and
+    /// its rotation search plus reference re-baselining still cover the night.
+    private func configureFieldRotation(shot: ShotModeItem) {
+        guard let cpu = stacker as? CPUStacker else { return }
+        guard shot.stackingStyle == .registered,
+              let target = shot.celestialTarget,
+              let location = AppLocation.shared.current else {
+            cpu.setExpectedRotationRate(degreesPerSecond: nil)
+            return
+        }
+        let coord = AimAssist().resolve(target: target, location: location, date: hooks.now())
+        guard coord.altitudeDeg > 0 else {
+            cpu.setExpectedRotationRate(degreesPerSecond: nil)
+            return
+        }
+        let ratePerSec = NudgePlanner.fieldRotationRateDegPerSecond(
+            altDeg: coord.altitudeDeg, azDeg: coord.azimuthDeg,
+            latitudeDeg: location.latitude)
+        guard ratePerSec.isFinite else {
+            cpu.setExpectedRotationRate(degreesPerSecond: nil)
+            return
+        }
+        cpu.setExpectedRotationRate(degreesPerSecond: ratePerSec)
+        stats.fieldRotationDegPerHour = ratePerSec * 3600
     }
 
     // MARK: Star-colour calibration (feature 6, SPCC-lite)
@@ -1418,12 +1622,22 @@ public final class SessionEngine: ObservableObject {
     /// first few observed frames, take the median background and let
     /// `ExposurePlanner.refine` decide — too near saturation drops a stop, a
     /// darker-than-planned sky raises one, anything healthy stands. Evaluated
-    /// at most once per session (applied or declined), registered-stack
-    /// sessions only (a mid-run gain step would print a visible seam into a
-    /// trails blend). Returns true when the adjustment was applied + narrated.
+    /// at most once per session (applied or declined).
+    ///
+    /// OFF unless the user opts in (`midSessionISOEnabled` — Settings → Capture,
+    /// default off). Changing gain part-way through an integration splits the
+    /// result into two populations that stack together badly, and the
+    /// low-background trigger fires routinely under the genuinely dark skies
+    /// this app exists for. A stack is one exposure from first frame to last;
+    /// the plan is chosen before capture and held. Trails and unregistered
+    /// styles stay excluded on top of that — a gain step prints a visible seam
+    /// straight into a lighten blend.
+    ///
+    /// Returns true when the adjustment was applied + narrated.
     private func refineExposureIfReady(recipe: inout CaptureRecipe,
                                        style: StackingStyle) -> Bool {
-        guard !exposureRefineEvaluated,
+        guard midSessionISOEnabled,
+              !exposureRefineEvaluated,
               style == .registered,
               backgroundSamples.count >= SessionEngine.refineAfterSamples else { return false }
         exposureRefineEvaluated = true
@@ -1445,6 +1659,65 @@ public final class SessionEngine: ObservableObject {
         if focusSharpness != telemetry.sharpness { focusSharpness = telemetry.sharpness }
         if focusSharpnessMean != telemetry.mean { focusSharpnessMean = telemetry.mean }
         if focusDrifting != telemetry.drifting { focusDrifting = telemetry.drifting }
+    }
+
+    // MARK: Per-frame evidence (frames.csv — see FrameTruth.swift)
+
+    /// Close one capture-loop frame's evidence row: the camera truth staged by
+    /// `CaptureEngine` (device) or synthesized here (simulator) plus this
+    /// frame's stacker verdict — star count, background, accept/reject, the
+    /// rejection reason, and the registration diagnostics. Every value is one
+    /// the session already computed for this frame; nothing is re-measured.
+    private func annotateFrameEvidence(frame: SubFrame, sessionFrameIndex: Int,
+                                       phase: String, accepted: Bool?,
+                                       cloudSkipped: Bool) {
+        // Only use the observation if it belongs to THIS frame.
+        let observation = lastFrameObservation?.timestamp == frame.timestamp
+            ? lastFrameObservation : nil
+        let cpu = stacker as? CPUStacker
+        let reason: String?
+        if cloudSkipped {
+            reason = "cloud gate skip"
+        } else if accepted == false {
+            reason = cpu?.lastRejectionReason
+        } else {
+            reason = nil
+        }
+        // "Aligned" means the stacker actually registered this frame against the
+        // reference — accepted alone is not enough (unregistered accumulate
+        // accepts every decodable frame without aligning anything).
+        let aligned = accepted == true && cpu?.registrationActive == true
+        FrameTruthLog.shared.annotate(
+            timestamp: frame.timestamp,
+            sessionFrameIndex: sessionFrameIndex,
+            phase: phase,
+            starCount: observation?.starCount,
+            backgroundLevel: observation?.backgroundLevel,
+            accepted: accepted,
+            rejectionReason: reason,
+            // Registration diagnostics only mean something for a frame that was
+            // actually ALIGNED and accepted. In unregistered accumulate (trails,
+            // timelapse, or a star-poor seed) the stacker leaves `lastMatchCount`
+            // at the detected-star count and `lastResidualPx` at 0 — writing
+            // those would read as a flawless alignment that never happened, so
+            // they stay empty instead.
+            matchedStars: aligned ? cpu?.lastMatchCount : nil,
+            residualPx: aligned ? cpu?.lastResidualPx : nil)
+    }
+
+    /// Log one PROBE frame (focus sweep, GoTo solve, cityscape foreground).
+    /// Probes never enter the stack, so they carry no verdict — but they are
+    /// real exposures the camera made, and `frames.csv` must have a row for
+    /// every one of them or "one row per frame" would be a lie.
+    private func logProbeFrame(_ frame: SubFrame, recipe: CaptureRecipe, phase: String) {
+        let log = FrameTruthLog.shared
+        log.stageIfNeeded(frame: frame, recipe: recipe,
+                          simulated: hooks.isSimulatedCapture)
+        let observation = lastFrameObservation?.timestamp == frame.timestamp
+            ? lastFrameObservation : nil
+        log.annotate(timestamp: frame.timestamp, phase: phase,
+                     starCount: observation?.starCount,
+                     backgroundLevel: observation?.backgroundLevel)
     }
 
     // MARK: Sky-condition monitoring
@@ -1474,6 +1747,17 @@ public final class SessionEngine: ObservableObject {
             observation = nil
         }
         guard let observation else { return false }
+        // Remembered for this frame's evidence row (frames.csv) — the same
+        // measurement the classifier used, never a second one.
+        lastFrameObservation = observation
+        // Measured star counts, mirrored into stats for the landing report and
+        // the AutoTest harness (diagnostics only — no decision reads them).
+        if stats.lastStarCount != observation.starCount {
+            stats.lastStarCount = observation.starCount
+        }
+        if observation.starCount > stats.peakStarCount {
+            stats.peakStarCount = observation.starCount
+        }
         // Every measured NON-cloud-skipped frame feeds the refinement.
         if feedRefine { backgroundSamples.append(observation.backgroundLevel) }
         let previous = skyCondition
@@ -1528,6 +1812,10 @@ public final class SessionEngine: ObservableObject {
         phase = .develop
         statusDetail = "Developing — stacking \(stats.subsAccepted) frames…"
         await hooks.endCapture()
+        // Close the per-frame ledger: flush any staged row and sync the index
+        // so the harness can pull a complete frames.csv the moment the session
+        // lands.
+        FrameTruthLog.shared.endSession()
         let skyFinal = stacker.finalImage() ?? stacker.currentResult().preview
         if let skyFinal { latestPreview = oriented(skyFinal) }
         // Cityscape dual-phase composite (feature 10): runs after the sky
@@ -1860,6 +2148,8 @@ public final class SessionEngine: ObservableObject {
         if stats.subsSkippedClouds > 0 {
             line += " · \(stats.subsSkippedClouds) cloud frames waited out"
         }
+        // A clock-stopped session ended on purpose, not short — say which.
+        if stats.stoppedOnClock { line += " · stopped on your clock" }
         if timelapseVideoURL != nil { line += " · timelapse clip saved" }
         if let outcome = cityscapeOutcome {
             // Three honest cases: a blend happened; the mask wasn't trusted;

@@ -2,6 +2,7 @@ import Foundation
 import SwiftUI
 import AVFoundation
 import CoreGraphics
+import ImageIO
 #if canImport(UIKit)
 import UIKit
 #endif
@@ -79,6 +80,13 @@ public final class CaptureEngine: ObservableObject {
     @Published public private(set) var focusSharpness: Double?
     @Published public private(set) var focusSharpnessMean: Double?
     @Published public private(set) var focusDrifting = false
+    /// What the camera ACTUALLY did for the newest delivered frame — requested
+    /// vs. actual exposure/ISO, the live exposure/focus/white-balance modes, the
+    /// active format, whether a RAW plane arrived, and the photo's own EXIF (see
+    /// `FrameTruth`). Every one of these is also appended to
+    /// `Documents/autotest/frames.csv` for the USB harness to pull.
+    /// Simulator builds publish clearly-marked synthetic values (`simulated`).
+    @Published public private(set) var latestFrameTruth: FrameTruth?
 
     /// Per-frame delivery. Called on the main actor with each captured sub.
     public var onFrame: ((SubFrame) -> Void)?
@@ -143,10 +151,13 @@ public final class CaptureEngine: ObservableObject {
     /// Configure (once) and start the sequential capture loop with the given recipe.
     public func start(recipe: CaptureRecipe) async throws {
         guard !isRunning else { return }
-        // Storage pre-flight: refuse to start a session plan the disk can't hold
-        // ("keep RAW subs" persists ~30 MB per frame — see StorageBudget).
+        // Storage pre-flight: refuse to start a session plan the disk can't hold.
+        // The estimate must match what this build actually writes — see
+        // `StorageBudget.retainsSubsOnDisk`. Nothing here persists per-sub files
+        // yet (the RAW plane is dropped below), so budgeting 30 MB/frame would
+        // refuse long, honest plans over bytes that are never written.
         let plannedBytes = StorageBudget.plannedSessionBytes(
-            recipe: recipe, keepingSubs: UserDefaults.standard.bool(forKey: "keepSubs"))
+            recipe: recipe, keepingSubs: StorageBudget.retainsSubsOnDisk())
         if case .refuse = StorageBudget.verdict(freeBytes: StorageBudget.systemFreeBytes(),
                                                 plannedBytes: plannedBytes) {
             throw CaptureError.insufficientStorage(neededBytes: plannedBytes)
@@ -162,6 +173,11 @@ public final class CaptureEngine: ObservableObject {
         focusSharpness = nil
         focusSharpnessMean = nil
         focusDrifting = false
+        latestFrameTruth = nil
+        // Fresh per-frame evidence ledger for this run (frames.csv + frames/).
+        // Idempotent when the session engine already opened one — nothing has
+        // been written between the two calls.
+        FrameTruthLog.shared.beginSession()
 
         #if targetEnvironment(simulator)
         isRunning = true
@@ -208,6 +224,9 @@ public final class CaptureEngine: ObservableObject {
     public func stop() {
         isRunning = false
         isPaused = false
+        // Any frame staged but never claimed by a session still belongs in the
+        // ledger — flush it so frames.csv has no gaps.
+        FrameTruthLog.shared.flushPending()
         #if targetEnvironment(simulator)
         simTask?.cancel()
         simTask = nil
@@ -271,7 +290,7 @@ public final class CaptureEngine: ObservableObject {
 
     // MARK: - Frame delivery (shared)
 
-    private func deliver(image: CGImage?) {
+    private func deliver(image: CGImage?, facts: CapturePhotoFacts = CapturePhotoFacts()) {
         guard let image else { return }
         let now = Date()
         if let last = lastFrameAt { lastGapSeconds = now.timeIntervalSince(last) }
@@ -279,10 +298,104 @@ public final class CaptureEngine: ObservableObject {
         let sub = SubFrame(index: frameIndex, timestamp: now,
                            exposureSeconds: appliedExposureSeconds,
                            iso: appliedISO, pixelData: image)
+        // Camera truth for THIS frame, captured before anything downstream can
+        // change device state. Staging is a struct copy + a queue hop; the JPEG
+        // dump and every write happen on the log's utility queue.
+        let truth = makeFrameTruth(index: frameIndex, timestamp: now,
+                                   image: image, facts: facts)
+        latestFrameTruth = truth
+        FrameTruthLog.shared.stage(truth, image: image)
         frameIndex += 1
         framesDelivered += 1
         onFrame?(sub)
         updateFocusMetric(with: image)
+    }
+
+    /// Build the per-frame truth record. On device every value is READ BACK from
+    /// the live `AVCaptureDevice` (plus the photo's own EXIF); on the simulator
+    /// the record is synthesized and flagged `simulated` so fake numbers can
+    /// never be mistaken for evidence.
+    private func makeFrameTruth(index: Int, timestamp: Date,
+                                image: CGImage,
+                                facts: CapturePhotoFacts) -> FrameTruth {
+        #if targetEnvironment(simulator)
+        return FrameTruth(
+            frameIndex: index,
+            timestamp: timestamp,
+            simulated: true,
+            // Nothing was read back from a sensor — there is no sensor.
+            sensorMeasured: false,
+            requestedExposureSeconds: activeRecipe.exposureSeconds,
+            actualExposureSeconds: appliedExposureSeconds,
+            requestedISO: activeRecipe.iso,
+            actualISO: appliedISO,
+            thermalStateRaw: thermalState.rawValue,
+            formatWidth: image.width,
+            formatHeight: image.height,
+            formatMaxExposureSeconds: 1.0,
+            formatSummary: "SIMULATED starfield \(image.width)x\(image.height) "
+                + "maxExp 1.000s (no sensor was involved)",
+            rawDelivered: false,
+            zslEnabled: false,
+            responsiveEnabled: false,
+            shotToShotSeconds: lastGapSeconds,
+            pixelWidth: image.width,
+            pixelHeight: image.height)
+        #else
+        var formatWidth = 0, formatHeight = 0, maxExposure = 0.0
+        var exposureMode = -1, focusMode = -1, whiteBalanceMode = -1
+        var lensPosition = -1.0
+        var actualExposure = appliedExposureSeconds
+        var actualISO = appliedISO
+        // Only a real read-back from the live device earns `sensorMeasured`.
+        // Without a camera these stay echoes of what we asked for, and the row
+        // must say so rather than passing them off as measurements.
+        var sensorMeasured = false
+        if let camera {
+            let format = camera.activeFormat
+            let dims = CMVideoFormatDescriptionGetDimensions(format.formatDescription)
+            formatWidth = Int(dims.width)
+            formatHeight = Int(dims.height)
+            maxExposure = CMTimeGetSeconds(format.maxExposureDuration)
+            exposureMode = camera.exposureMode.rawValue
+            focusMode = camera.focusMode.rawValue
+            whiteBalanceMode = camera.whiteBalanceMode.rawValue
+            lensPosition = Double(camera.lensPosition)
+            let measured = CMTimeGetSeconds(camera.exposureDuration)
+            if measured.isFinite, measured > 0 { actualExposure = measured }
+            if camera.iso.isFinite, camera.iso > 0 { actualISO = Double(camera.iso) }
+            sensorMeasured = true
+        }
+        return FrameTruth(
+            frameIndex: index,
+            timestamp: timestamp,
+            simulated: false,
+            sensorMeasured: sensorMeasured,
+            requestedExposureSeconds: activeRecipe.exposureSeconds,
+            actualExposureSeconds: actualExposure,
+            requestedISO: activeRecipe.iso,
+            actualISO: actualISO,
+            exposureModeRaw: exposureMode,
+            focusModeRaw: focusMode,
+            lensPosition: lensPosition,
+            whiteBalanceModeRaw: whiteBalanceMode,
+            thermalStateRaw: thermalState.rawValue,
+            formatWidth: formatWidth,
+            formatHeight: formatHeight,
+            formatMaxExposureSeconds: maxExposure,
+            formatSummary: "\(formatWidth)x\(formatHeight) maxExp "
+                + String(format: "%.3fs", maxExposure),
+            rawDelivered: facts.rawDelivered,
+            zslEnabled: photoOutput.isZeroShutterLagSupported
+                ? photoOutput.isZeroShutterLagEnabled : false,
+            responsiveEnabled: photoOutput.isResponsiveCaptureSupported
+                ? photoOutput.isResponsiveCaptureEnabled : false,
+            shotToShotSeconds: lastGapSeconds,
+            exifExposureSeconds: facts.exifExposureSeconds,
+            exifISO: facts.exifISO,
+            pixelWidth: image.width,
+            pixelHeight: image.height)
+        #endif
     }
 
     /// Focus telemetry runs detached at utility priority: the ~128 px downscale +
@@ -470,9 +583,9 @@ public final class CaptureEngine: ObservableObject {
         settings.flashMode = .off
 
         let id = settings.uniqueID
-        let proxy = PhotoCaptureProxy { [weak self] image, error in
+        let proxy = PhotoCaptureProxy { [weak self] image, facts, error in
             Task { @MainActor in
-                self?.finishCapture(id: id, image: image, error: error)
+                self?.finishCapture(id: id, image: image, facts: facts, error: error)
             }
         }
         proxies[id] = proxy
@@ -481,13 +594,14 @@ public final class CaptureEngine: ObservableObject {
         }
     }
 
-    private func finishCapture(id: Int64, image: CGImage?, error: Error?) {
+    private func finishCapture(id: Int64, image: CGImage?,
+                               facts: CapturePhotoFacts, error: Error?) {
         // A completion whose proxy was already disowned belongs to a stopped
         // session — ignore it entirely (its frame must not enter a newer stack).
         guard proxies.removeValue(forKey: id) != nil else { return }
         captureInFlight = false
         guard isRunning else { return }
-        if error == nil { deliver(image: image) }
+        if error == nil { deliver(image: image, facts: facts) }
         scheduleNextCapture()
     }
 
@@ -508,10 +622,12 @@ public final class CaptureEngine: ObservableObject {
     /// Collects the processed frame across delegate callbacks and reports once on
     /// `didFinishCapture` — the point from which the next capture is chained.
     private final class PhotoCaptureProxy: NSObject, AVCapturePhotoCaptureDelegate {
-        private let completion: (CGImage?, Error?) -> Void
+        private let completion: (CGImage?, CapturePhotoFacts, Error?) -> Void
         private var processedImage: CGImage?
+        /// The photo's own account of itself, harvested for the truth log.
+        private var facts = CapturePhotoFacts()
 
-        init(completion: @escaping (CGImage?, Error?) -> Void) {
+        init(completion: @escaping (CGImage?, CapturePhotoFacts, Error?) -> Void) {
             self.completion = completion
         }
 
@@ -521,6 +637,22 @@ public final class CaptureEngine: ObservableObject {
             guard error == nil else { return }
             // The Bayer RAW plane arrives here too (photo.isRawPhoto == true);
             // v1 stacks the processed twin. RAW persistence lands in a later round.
+            // Whether it arrived at ALL is evidence in its own right, so record it.
+            if photo.isRawPhoto { facts.rawDelivered = true }
+            // EXIF is the camera's own account of the frame — the independent
+            // cross-check on the requested exposure/ISO in the truth log.
+            if let exif = photo.metadata[kCGImagePropertyExifDictionary as String]
+                as? [String: Any] {
+                if let time = exif[kCGImagePropertyExifExposureTime as String] as? Double {
+                    facts.exifExposureSeconds = time
+                }
+                if let iso = (exif[kCGImagePropertyExifISOSpeedRatings as String]
+                                as? [NSNumber])?.first {
+                    facts.exifISO = iso.doubleValue
+                } else if let iso = exif[kCGImagePropertyExifISOSpeedRatings as String] as? Double {
+                    facts.exifISO = iso
+                }
+            }
             // Fall back to the embedded preview if the full-size CGImage is
             // unavailable — a real (smaller) sensor image beats a dropped frame.
             if !photo.isRawPhoto, processedImage == nil {
@@ -532,7 +664,9 @@ public final class CaptureEngine: ObservableObject {
         func photoOutput(_ output: AVCapturePhotoOutput,
                          didFinishCaptureFor resolvedSettings: AVCaptureResolvedPhotoSettings,
                          error: Error?) {
-            completion(processedImage, error)
+            facts.photoWidth = Int(resolvedSettings.photoDimensions.width)
+            facts.photoHeight = Int(resolvedSettings.photoDimensions.height)
+            completion(processedImage, facts, error)
         }
     }
 

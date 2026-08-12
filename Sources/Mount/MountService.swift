@@ -498,6 +498,40 @@ public final class MountService: ObservableObject, MountControlling {
 
     #endif
 
+    // MARK: Diagnostics (AutoTest harness — read-only or explicitly bypassing)
+
+    /// Monotonic count of FRESH encoder samples ingested since launch. The
+    /// AutoTest harness differentiates it over a fixed window to MEASURE the
+    /// real `motionStates` sample rate on hardware instead of quoting the
+    /// bench estimate (~4 Hz). Read-only: only `ingestEncoderSample` moves it.
+    public var encoderSampleCount: Int { sampleCounter }
+
+    /// Diagnostic-only velocity impulse that DELIBERATELY bypasses the
+    /// connection/authority guards `slew` and `nudge` enforce. It exists for
+    /// exactly one question the guarded paths can never answer: do the motors
+    /// move when `authority` reads `.denied`? Always zeroes velocity before
+    /// returning, clamps its own duration, and declines while a real motion
+    /// plan is in flight (returns false) so it can never fight the session.
+    ///
+    /// Not used by the app — only by `AutoTestRunner`'s authority experiment.
+    @discardableResult
+    public func debugRawImpulse(pitchRadPerSec: Double, yawRadPerSec: Double,
+                                seconds: TimeInterval) async -> Bool {
+        guard motionTask == nil else { return false }
+        await sendVelocity(pitchRadPerSec: pitchRadPerSec, yawRadPerSec: yawRadPerSec)
+        try? await Task.sleep(nanoseconds: UInt64(max(0, min(seconds, 3.0)) * 1_000_000_000))
+        await sendZero()
+        return true
+    }
+
+    #if canImport(DockKit) && !targetEnvironment(simulator)
+    /// Diagnostic-only handle on the live DockKit accessory so the AutoTest
+    /// authority experiment can try recovery candidates this service
+    /// deliberately never uses in production (`setOrientation`,
+    /// `selectSubject`). Nil until an accessory docks.
+    public var debugAccessory: DockAccessory? { accessory }
+    #endif
+
     // MARK: Simulator edge-case hooks (no-ops on hardware builds)
 
     /// Simulate a mid-session undock (starts the flap debounce). Simulator builds only.

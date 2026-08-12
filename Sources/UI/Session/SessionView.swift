@@ -445,9 +445,20 @@ struct SessionView: View {
                     .font(Theme.title)
                     .foregroundStyle(Theme.primaryText(night))
                 if let startedAt = stats.startedAt, phase != .complete {
-                    Text("Elapsed \(sessionClock(now.timeIntervalSince(startedAt)))")
-                        .font(Theme.liveValue(13))
-                        .foregroundStyle(Theme.secondaryText(night))
+                    HStack(spacing: 8) {
+                        Text("Elapsed \(sessionClock(now.timeIntervalSince(startedAt)))")
+                            .font(Theme.liveValue(13))
+                            .foregroundStyle(Theme.secondaryText(night))
+                        // Wall-clock stop, when the user set one: the deadline is
+                        // as much a part of "how long is left" as the sub count.
+                        if let stopAt = shot.recipe.stopAt {
+                            Text("until \(TonightFormat.clock(stopAt))")
+                                .font(Theme.liveValue(13))
+                                .foregroundStyle(Theme.accent(night))
+                                .accessibilityLabel(
+                                    "Stops at \(TonightFormat.clock(stopAt))")
+                        }
+                    }
                 } else {
                     Text(shot.tagline)
                         .font(Theme.caption)
@@ -1107,6 +1118,27 @@ private struct LandingReport: View {
                     Text("Stacked from \(stats.subsAccepted) × 1 s subs — the honest way a phone does a long exposure.")
                         .font(Theme.caption)
                         .foregroundStyle(Theme.secondaryText(night))
+                    // A clock-stopped session ended the way it was told to.
+                    // Saying so keeps a sub count below the plan from reading
+                    // as a failure on the report — but only when there IS a
+                    // stack. A deadline that elapsed during setup leaves one or
+                    // two frames, and "everything captured is stacked here"
+                    // would be a boast about nothing; that case gets the truth.
+                    if stats.stoppedOnClock, let stopAt = shot.recipe.stopAt {
+                        Text(stats.subsAccepted >= 2
+                             ? "Ended on your wall-clock stop at "
+                                + "\(TonightFormat.clock(stopAt)) — the plan's "
+                                + "\(shot.recipe.targetSubCount) subs weren't the finish "
+                                + "line, your clock was. Everything captured is stacked here."
+                             : "Your stop time (\(TonightFormat.clock(stopAt))) had already "
+                                + "passed by the time capture began — connecting, framing "
+                                + "and focusing spent the window, so there was no night "
+                                + "left to stack. Allow setup time on the next one, or "
+                                + "start it again with no stop time.")
+                            .font(Theme.caption)
+                            .foregroundStyle(Theme.secondaryText(night))
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
                 }
             }
 

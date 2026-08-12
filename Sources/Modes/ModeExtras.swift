@@ -43,6 +43,11 @@ enum ModeChecklists {
     static let milkyWay = gimbalRig(framing:
         "Framed low toward the core with a slice of horizon — a real foreground "
         + "is what sells the scale.")
+        + ["Set for the long haul — 2,700 back-to-back subs is 45 minutes at best, "
+           + "and longer once the phone warms up and starts spacing frames out. "
+           + "Start above 60% battery or run a power bank (the session stops itself "
+           + "at 20%), and set a stop time on this sheet if the core sets, twilight "
+           + "is coming, or you have a drive home."]
 
     static let starTrails = gimbalRig(framing:
         "Anchor in frame — face north for circles around Polaris, or east/west "
